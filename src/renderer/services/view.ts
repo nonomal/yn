@@ -1,15 +1,16 @@
 import juice from 'juice'
-import { CtrlCmd, Escape, registerCommand } from '@fe/core/command'
+import { Escape } from '@fe/core/keybinding'
 import { getActionHandler, registerAction } from '@fe/core/action'
-import { triggerHook } from '@fe/core/hook'
+import { registerHook, triggerHook } from '@fe/core/hook'
 import * as ioc from '@fe/core/ioc'
-import { DOM_CLASS_NAME } from '@fe/support/args'
+import { DOM_ATTR_NAME, DOM_CLASS_NAME } from '@fe/support/args'
 import { useToast } from '@fe/support/ui/toast'
 import store from '@fe/support/store'
+import { sleep } from '@fe/utils'
 import type { BuildInHookTypes, Components, Previewer } from '@fe/types'
 import { t } from './i18n'
 import { emitResize } from './layout'
-import { switchDoc } from './document'
+import { isSameFile } from './document'
 
 export type MenuItem = Components.ContextMenu.Item
 export type BuildContextMenu = (items: MenuItem[], e: MouseEvent) => void
@@ -17,6 +18,7 @@ export type Heading = {
   tag: string;
   class: string;
   text: string;
+  id: string;
   level: number;
   sourceLine: number;
   activated?: boolean;
@@ -24,6 +26,7 @@ export type Heading = {
 
 let tmpEnableSyncScroll = true
 let syncScrollTimer: any
+let renderIframe: HTMLIFrameElement
 
 const contextMenuFunList: BuildContextMenu[] = []
 
@@ -31,10 +34,25 @@ function present (flag: boolean) {
   if (flag) {
     useToast().show('info', t('exit-presentation-msg'))
   }
-  store.commit('setPresentation', flag)
+  store.state.presentation = flag
   setTimeout(() => {
     emitResize()
   }, 0)
+}
+
+async function getElement (id: string) {
+  id = id.replaceAll('%28', '(').replaceAll('%29', ')')
+
+  const document = (await getRenderIframe()).contentDocument!
+
+  const _find = (id: string) => document.getElementById(id) ||
+    document.getElementById(decodeURIComponent(id)) ||
+    document.getElementById(encodeURIComponent(id)) ||
+    document.getElementById(id.replace(/^h-/, '')) ||
+    document.getElementById(decodeURIComponent(id.replace(/^h-/, ''))) ||
+    document.getElementById(encodeURIComponent(id.replace(/^h-/, '')))
+
+  return _find(id) || _find(id.toUpperCase())
 }
 
 /**
@@ -55,11 +73,6 @@ export function renderImmediately () {
  * Refresh view.
  */
 export async function refresh () {
-  if (store.state.currentFile) {
-    const { type, name, path, repo } = store.state.currentFile
-    await switchDoc({ type, name, path, repo }, true)
-  }
-
   getActionHandler('view.refresh')()
 }
 
@@ -67,31 +80,111 @@ export async function refresh () {
  * Reveal line.
  * @param startLine
  */
-export function revealLine (startLine: number) {
-  getActionHandler('view.reveal-line')(startLine)
+export async function revealLine (startLine: number) {
+  return getActionHandler('view.reveal-line')(startLine)
+}
+
+/**
+ * Highlight line.
+ * @param line
+ * @@param reveal
+ * @param duration
+ */
+export async function highlightLine (line: number, reveal: boolean, duration = 1000) {
+  const viewDom = getViewDom()
+
+  let el: HTMLElement | null | undefined = null
+
+  if (reveal) {
+    el = await revealLine(line)
+    const contentWindow = (await getRenderIframe()).contentWindow!
+    contentWindow.scrollBy(0, -120)
+  } else {
+    el = viewDom?.querySelector<HTMLElement>(`[${DOM_ATTR_NAME.SOURCE_LINE_START}="${line}"]`)
+  }
+
+  if (el) {
+    el.classList.add(DOM_CLASS_NAME.PREVIEW_HIGHLIGHT)
+    if (duration) {
+      sleep(duration).then(() => {
+        el!.classList.remove(DOM_CLASS_NAME.PREVIEW_HIGHLIGHT)
+      })
+    }
+  }
+
+  return el
+}
+
+/**
+ * Highlight anchor.
+ * @param anchor
+ * @param reveal
+ * @param duration
+ */
+export async function highlightAnchor (anchor: string, reveal: boolean, duration = 1000) {
+  const el = await getElement(anchor)
+  if (!el) {
+    return null
+  }
+
+  if (reveal) {
+    el.scrollIntoView()
+
+    // retain 60 px for better view.
+    const contentWindow = (await getRenderIframe()).contentWindow!
+    contentWindow.scrollBy(0, -60)
+  }
+
+  // highlight element
+  el.classList.add(DOM_CLASS_NAME.PREVIEW_HIGHLIGHT)
+
+  if (duration) {
+    sleep(duration).then(() => {
+      el.classList.remove(DOM_CLASS_NAME.PREVIEW_HIGHLIGHT)
+    })
+  }
+
+  return el
 }
 
 /**
  * Scroll to a position.
  * @param top
  */
-export function scrollTopTo (top: number) {
-  getActionHandler('view.scroll-top-to')(top)
+export async function scrollTopTo (top: number) {
+  const iframe = await getRenderIframe()
+  iframe.contentWindow?.scrollTo(0, top)
+}
+
+export function getScrollTop () {
+  if (renderIframe) {
+    return renderIframe.contentWindow?.scrollY
+  }
 }
 
 export function getPreviewStyles () {
-  let styles = 'article.markdown-body { max-width: 1024px; margin: 20px auto; }'
-  Array.prototype.forEach.call(document.styleSheets, item => {
-    // inject global styles, normalize.css
-    const flag = item.cssRules[0] &&
-      item.cssRules[0].selectorText === 'html' &&
-      item.cssRules[0].cssText === 'html { line-height: 1.15; text-size-adjust: 100%; }'
+  let styles = `article.${DOM_CLASS_NAME.PREVIEW_MARKDOWN_BODY} { max-width: 1024px; margin: 20px auto; }`
 
-    Array.prototype.forEach.call(item.cssRules, (rule) => {
+  const getCssRules = (item: CSSStyleSheet) => {
+    try {
+      return item.cssRules
+    } catch (error) {
+      console.warn('Failed to get css rules', error)
+      return []
+    }
+  }
+
+  Array.prototype.forEach.call(renderIframe.contentDocument!.styleSheets, (item: CSSStyleSheet) => {
+    const node = item.ownerNode as HTMLElement | null
+    const flag = (node?.tagName === 'STYLE' && node.getAttribute(DOM_ATTR_NAME.SKIP_EXPORT) !== 'true') ||
+      Array.prototype.some.call(getCssRules(item), (rule: CSSRule) => {
+        return rule.cssText.includes('--common-styles')
+      })
+
+    Array.prototype.forEach.call(getCssRules(item), (rule) => {
       if (rule.selectorText && (
         flag ||
-        rule.selectorText.includes('.markdown-body') ||
-        rule.selectorText.startsWith('.katex')
+        rule.selectorText.includes('.' + DOM_CLASS_NAME.PREVIEW_MARKDOWN_BODY)
       )) {
         // skip contain rules
         if (rule?.style?.getPropertyValue('--skip-contain')) {
@@ -140,6 +233,14 @@ export async function getContentHtml (options: BuildInHookTypes['VIEW_ON_GET_HTM
         node.removeAttribute('title')
       }
 
+      if (node.tagName === 'A' && node.getAttribute('href')?.startsWith('#')) {
+        node.removeAttribute('target')
+      }
+
+      if (node.tagName === 'AUDIO') {
+        node.removeAttribute('preload')
+      }
+
       const len = node.children.length
       for (let i = len - 1; i >= 0; i--) {
         const ele = node.children[i]
@@ -153,7 +254,7 @@ export async function getContentHtml (options: BuildInHookTypes['VIEW_ON_GET_HTM
     return div.innerHTML || ''
   }
 
-  let html = getActionHandler('view.get-content-html')()
+  let html = getActionHandler('view.get-content-html')(options.onlySelected)
     .replace(/ src="/g, ' loading="lazy" src="')
 
   if (inlineStyle) {
@@ -175,14 +276,14 @@ export function getViewDom () {
  * Get Headings
  */
 export function getHeadings (withActivated = false): Heading[] {
-  const dom = getViewDom()?.parentElement
-  if (!dom) {
+  const document = renderIframe.contentDocument
+  const dom = getViewDom()
+  if (!dom || !document) {
     return []
   }
 
   const tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
 
-  let viewRect: DOMRect
   let breakCheck = false
   const isActivated = (nodes: NodeListOf<HTMLHeadElement>, i: number) => {
     if (!withActivated) {
@@ -193,19 +294,16 @@ export function getHeadings (withActivated = false): Heading[] {
       return false
     }
 
-    if (!viewRect) {
-      viewRect = dom.getBoundingClientRect()
-    }
-
     const node = nodes[i]
     const nodeRect = node.getBoundingClientRect()
 
-    const bottom = viewRect.bottom / 3 * 2
+    const bottom = document.documentElement.clientHeight / 3 * 2
+
     // in view
-    if (nodeRect.top >= viewRect.top && nodeRect.top < bottom) {
+    if (nodeRect.top >= 0 && nodeRect.top < bottom) {
       breakCheck = true
       return true
-    } else if (nodeRect.top < viewRect.top) { // before view
+    } else if (nodeRect.top < 0) { // before view
       const nextNode = i < nodes.length - 1 ? nodes[i + 1] : undefined
       const res = !nextNode || nextNode.getBoundingClientRect().top > bottom
       if (res) {
@@ -226,6 +324,7 @@ export function getHeadings (withActivated = false): Heading[] {
     return {
       tag,
       class: `heading ${node.className} tag-${tag}`,
+      id: node.id,
       text: node.textContent || '',
       level: tags.indexOf(tag),
       sourceLine: parseInt(node.dataset.sourceLine || '0'),
@@ -261,7 +360,7 @@ export function exitPresent () {
  * @param flag
  */
 export function toggleAutoPreview (flag?: boolean) {
-  store.commit('setAutoPreview', typeof flag === 'boolean' ? flag : !store.state.autoPreview)
+  store.state.autoPreview = typeof flag === 'boolean' ? flag : !store.state.autoPreview
 }
 
 /**
@@ -269,7 +368,7 @@ export function toggleAutoPreview (flag?: boolean) {
  * @param flag
  */
 export function toggleSyncScroll (flag?: boolean) {
-  store.commit('setSyncScroll', typeof flag === 'boolean' ? flag : !store.state.syncScroll)
+  store.state.syncScroll = typeof flag === 'boolean' ? flag : !store.state.syncScroll
 }
 
 /**
@@ -287,9 +386,9 @@ export function tapContextMenus (fun: BuildContextMenu) {
 export function switchPreviewer (name: string) {
   const oldPreviewer = store.state.previewer
   if (ioc.get('VIEW_PREVIEWER').some((item) => item.name === name)) {
-    store.commit('setPreviewer', name)
+    store.state.previewer = name
   } else {
-    store.commit('setPreviewer', 'default')
+    store.state.previewer = 'default'
   }
 
   if (oldPreviewer !== store.state.previewer) {
@@ -344,7 +443,9 @@ export function getContextMenuItems (e: MouseEvent) {
  * @returns
  */
 export function getEnableSyncScroll () {
-  return tmpEnableSyncScroll && store.state.syncScroll
+  return tmpEnableSyncScroll &&
+    store.state.syncScroll &&
+    isSameFile(getRenderEnv()?.file, store.state.currentFile)
 }
 
 /**
@@ -361,8 +462,87 @@ export async function disableSyncScrollAwhile (fn: Function, timeout = 500) {
   }, timeout)
 }
 
+/**
+ * Get render Iframe
+ * @returns
+ */
+export function getRenderIframe (): Promise<HTMLIFrameElement> {
+  if (renderIframe) {
+    return Promise.resolve(renderIframe)
+  }
+
+  return new Promise((resolve) => {
+    registerHook('VIEW_RENDER_IFRAME_READY', ({ iframe }) => {
+      renderIframe = iframe
+      resolve(iframe)
+    }, true)
+  })
+}
+
+/**
+ * Add styles to default preview.
+ * @param style
+ * @param skipExport
+ * @return css dom
+ */
+export async function addStyles (style: string, skipExport = false) {
+  const iframe = await getRenderIframe()
+  const document = iframe.contentDocument!
+  const css = document.createElement('style')
+  css.id = 'style-' + Math.random().toString(36).slice(2, 9) + '-' + Date.now()
+
+  if (skipExport) {
+    css.setAttribute(DOM_ATTR_NAME.SKIP_EXPORT, 'true')
+  }
+
+  css.innerHTML = style
+
+  document.head.appendChild(css)
+
+  return css
+}
+
+/**
+ * Add style link to default preview.
+ * @param href
+ * @returns link dom
+ */
+export async function addStyleLink (href: string) {
+  const iframe = await getRenderIframe()
+  const document = iframe.contentDocument!
+  const link = document.createElement('link')
+  link.id = 'link-' + Math.random().toString(36).slice(2, 9) + '-' + Date.now()
+  link.rel = 'stylesheet'
+  link.href = href
+  document.head.appendChild(link)
+
+  return link
+}
+
+/**
+ * Add script to default preview.
+ * @param src
+ * @returns script dom
+ */
+export async function addScript (src: string) {
+  const iframe = await getRenderIframe()
+  const document = iframe.contentDocument!
+  const script = document.createElement('script')
+  script.id = 'script-' + Math.random().toString(36).slice(2, 9) + '-' + Date.now()
+  script.src = src
+  document.body.appendChild(script)
+
+  return script
+}
+
+registerHook('VIEW_RENDER_IFRAME_READY', ({ iframe }) => {
+  renderIframe = iframe
+})
+
 registerAction({
   name: 'view.enter-presentation',
+  forUser: true,
+  description: t('command-desc.view_enter-presentation'),
   handler: () => present(true),
   keys: ['F5']
 })
@@ -372,7 +552,7 @@ registerAction({
   handler: () => present(false),
   keys: [Escape],
   when: () => {
-    const el = window.document.activeElement
+    const el = (renderIframe?.contentDocument || window.document).activeElement
     return store.state.presentation &&
       el?.tagName !== 'INPUT' &&
       el?.tagName !== 'TEXTAREA' &&
@@ -380,10 +560,4 @@ registerAction({
         .filter(x => x.tagName === 'DIV' && x.clientWidth > 10 && x.clientHeight > 10)
         .length < 2
   }
-})
-
-registerCommand({
-  id: 'view.refresh',
-  handler: refresh,
-  keys: [CtrlCmd, 'r']
 })

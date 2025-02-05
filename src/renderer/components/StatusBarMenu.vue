@@ -1,15 +1,16 @@
 <template>
-  <div class="status-bar-menu-wrapper" @contextmenu.prevent>
+  <div class="status-bar-menu-wrapper" @contextmenu.prevent @click.capture="onMenuClick">
     <div
       :class="{'status-bar-menu': true, hidden: menu.hidden, 'custom-title': menu._customTitle}"
       v-for="menu in list.sort((a: any, b: any) => ((a.order || 0) - (b.order || 0)))"
       :key="menu.id"
+      :data-id="menu.id"
       @mousedown="menu.onMousedown && menu.onMousedown(menu)"
       @click="menu.onClick && menu.onClick(menu)">
       <div v-if="menu._customTitle" class="custom-title">
         <component :is="menu.title" />
       </div>
-      <div v-else class="title" :title="menu.tips">
+      <div v-else :class="{title: true, 'no-text': !menu.title}" :title="menu.tips">
         <svg-icon v-if="menu.icon" :name="menu.icon" class="title-icon" />
         <div v-if="menu.title" class="title-text">{{menu.title}}</div>
       </div>
@@ -18,7 +19,7 @@
           <li v-if="item.type === 'separator' && !item.hidden" :class="item.type"></li>
           <li
             v-else-if="item.type !== 'separator' && !item.hidden"
-            :class="{[item.type]: true, disabled: item.disabled}"
+            :class="{[item.type]: true, disabled: item.disabled, ellipsis: item.ellipsis}"
             :title="item.tips"
             @click="handleItemClick(item)">
             <svg-icon class="checked-icon" v-if="item.checked" name="check-solid" />
@@ -33,7 +34,7 @@
 
 <script lang="ts">
 import { computed, defineComponent, onBeforeUnmount, ref, shallowRef } from 'vue'
-import { getMenus, MenuItem } from '@fe/services/status-bar'
+import { getMenus, MenuItem, refreshMenu } from '@fe/services/status-bar'
 import { registerHook, removeHook } from '@fe/core/hook'
 import type { BuildInActionName } from '@fe/types'
 import SvgIcon from './SvgIcon.vue'
@@ -77,6 +78,10 @@ export default defineComponent({
       return false
     }
 
+    const onMenuClick = () => {
+      setTimeout(refreshMenu, 50)
+    }
+
     registerHook('ACTION_BEFORE_RUN', updateMenu as any)
     registerHook('I18N_CHANGE_LANGUAGE', updateMenu as any)
     onBeforeUnmount(() => {
@@ -87,7 +92,8 @@ export default defineComponent({
     return {
       list,
       showList,
-      handleItemClick
+      handleItemClick,
+      onMenuClick
     }
   },
 })
@@ -97,9 +103,10 @@ export default defineComponent({
 .status-bar-menu {
   cursor: pointer;
   user-select: none;
-  z-index: 99999;
+  z-index: 300000;
   position: relative;
   overflow-x: hidden;
+  font-variant-numeric: tabular-nums;
 }
 
 .status-bar-menu.hidden {
@@ -120,6 +127,10 @@ export default defineComponent({
   width: fit-content;
   display: flex;
   align-content: center;
+
+  &.no-text {
+    padding: 0 .65em;
+  }
 }
 
 .title-icon {
@@ -149,6 +160,8 @@ export default defineComponent({
 
 .list {
   min-width: 70px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
   margin: 0;
   list-style: none;
   background: #4a4b4d;
@@ -193,11 +206,19 @@ export default defineComponent({
     }
   }
 
+  &.ellipsis {
+    .menu-item-title {
+      &::after {
+        content: '...';
+      }
+    }
+  }
+
   .checked-icon {
     position: absolute;
     width: 12px;
     height: 12px;
-    transform: translateX(-14px) translateY(-2px) scaleX(0.8);
+    transform: translateX(-14px) translateY(0) scaleX(0.8);
   }
 
   .menu-item-sub-title {

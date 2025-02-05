@@ -1,6 +1,7 @@
 import { createApp, defineComponent, shallowRef } from 'vue'
 import type { Components } from '@fe/types'
 import QuickFilter from '@fe/components/QuickFilter.vue'
+import directives from '@fe/directives'
 
 interface Opts extends Components.QuickFilter.Props {
   onInput?: (keyword: string) => void;
@@ -24,6 +25,7 @@ export function useQuickFilter (): Instance {
 
 export default function install () {
   const quickFilter = createApp(defineComponent({
+    name: 'g-quick-filter',
     setup (props, { expose }) {
       const attrs = shallowRef<Opts | null>(null)
 
@@ -40,6 +42,8 @@ export default function install () {
       return () => attrs.value && <QuickFilter {...attrs.value} onClose={hide} />
     },
   }))
+
+  quickFilter.use(directives)
 
   const el = document.createElement('div')
   document.body.appendChild(el)

@@ -1,6 +1,9 @@
-import type { Components, Doc, ExportType, FileItem, PathItem } from '@fe/types'
+import type { Stats } from 'fs'
+import type { WatchOptions } from 'chokidar'
+import type { IProgressMessage, ISerializedFileMatch, ISerializedSearchSuccess, ITextQuery } from 'ripgrep-wrapper'
+import type { Components, Doc, ExportType, FileItem, FileReadResult, FileSort, FileStat, PathItem } from '@fe/types'
 import { isElectron } from '@fe/support/env'
-import { JWT_TOKEN } from './args'
+import { HELP_REPO_NAME, JWT_TOKEN } from './args'
 
 export type ApiResult<T = any> = {
   status: 'ok' | 'error',
@@ -40,29 +43,58 @@ export async function fetchHttp (input: RequestInfo, init?: RequestInit) {
 }
 
 /**
- * Proxy request.
- * @param url URL
- * @param reqOptions
- * @param usePost
+ * Proxy fetch.
+ * @param url RequestInfo | URL
+ * @param init RequestInit
  * @returns
  */
-export async function proxyRequest (url: string, reqOptions: Record<string, any> = {}, usePost = false) {
-  let res: Response
-  if (usePost) {
-    res = await fetch('/api/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-      body: JSON.stringify({
-        url: url,
-        options: reqOptions
-      })
-    })
-  } else {
-    const options = encodeURIComponent(JSON.stringify(reqOptions))
-    res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}&options=${options}`, {
-      headers: getAuthHeader()
-    })
+export async function proxyFetch (url: RequestInfo | URL, init?: Omit<RequestInit, 'body'> & {
+  body?: any,
+  timeout?: number,
+  proxy?: string,
+  jsonBody?: boolean,
+}) {
+  if (!url) {
+    throw new Error('url is required')
   }
+
+  const _init: typeof init = { ...init }
+  let _headers = init?.headers
+  let _url: RequestInfo | URL
+
+  const prefix = '/api/proxy-fetch/'
+
+  if (typeof url === 'string') {
+    _url = `${prefix}${url}`
+  } else if ('href' in url) { // same as URL. we do not use instanceof URL because of the compatibility with cross iframe
+    _url = new URL(`${prefix}${url.href}`)
+  } else { // Request
+    _url = new Request(`${prefix}${(url as Request).url}`, url)
+    _headers = _url.headers
+  }
+
+  const headers = new Headers(_headers)
+
+  if (typeof _init.timeout === 'number') {
+    headers.set('x-proxy-timeout', String(_init.timeout))
+  }
+
+  if (_init.proxy) {
+    headers.set('x-proxy-url', _init.proxy)
+  }
+
+  if (_init.redirect === 'error' || _init.redirect === 'manual') {
+    headers.set('x-proxy-max-redirections', '0')
+  }
+
+  if (_init.jsonBody) {
+    headers.set('Content-Type', 'application/json')
+    _init.body = JSON.stringify(_init.body)
+  }
+
+  headers.set('x-yn-authorization', 'Bearer ' + JWT_TOKEN)
+
+  const res: Response = await fetch(_url, { ..._init, headers })
 
   if (res.headers.get('x-yank-note-api-status') === 'error') {
     const msg = res.headers.get('x-yank-note-api-message') || 'error'
@@ -79,7 +111,7 @@ export async function proxyRequest (url: string, reqOptions: Record<string, any>
  */
 async function fetchHelpContent (docName: string) {
   const result = await fetchHttp('/api/help?doc=' + docName)
-  return { content: result.data.content, hash: '' }
+  return { content: result.data.content, hash: '', stat: { mtime: 0, birthtime: 0, size: 0 }, writeable: true }
 }
 
 /**
@@ -88,18 +120,17 @@ async function fetchHelpContent (docName: string) {
  * @param asBase64
  * @returns
  */
-export async function readFile (file: PathItem, asBase64 = false) {
+export async function readFile (file: PathItem, asBase64 = false): Promise<FileReadResult> {
   const { path, repo } = file
 
-  if (repo === '__help__') {
+  if (repo === HELP_REPO_NAME) {
     return await fetchHelpContent(path)
   }
 
-  const result = await fetchHttp(`/api/file?path=${encodeURIComponent(path)}&repo=${encodeURIComponent(repo)}${asBase64 ? '&asBase64=true' : ''}`)
-  const hash = result.data.hash
-  const content = result.data.content
+  const url = `/api/file?path=${encodeURIComponent(path)}&repo=${encodeURIComponent(repo)}${asBase64 ? '&asBase64=true' : ''}`
+  const { data } = await fetchHttp(url)
 
-  return { content, hash }
+  return data
 }
 
 /**
@@ -109,19 +140,19 @@ export async function readFile (file: PathItem, asBase64 = false) {
  * @param asBase64
  * @returns
  */
-export async function writeFile (file: Doc, content = '', asBase64 = false) {
+export async function writeFile (file: Pick<Doc, 'repo' | 'path' | 'contentHash'>, content = '', asBase64 = false): Promise<{ hash: string, stat: FileStat }> {
   const { repo, path, contentHash } = file
-  const result = await fetchHttp('/api/file', {
+  const { data } = await fetchHttp('/api/file', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo, path, content, oldHash: contentHash, asBase64 })
   })
 
-  return { hash: result.data }
+  return data
 }
 
 /**
- * Move / Remove a file or dir.
+ * Move / Rename a file or dir.
  * @param file
  * @param newPath
  * @returns
@@ -131,21 +162,37 @@ export async function moveFile (file: FileItem, newPath: string): Promise<ApiRes
   return fetchHttp('/api/file', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repo: repo, oldPath: path, newPath })
+    body: JSON.stringify({ repo, oldPath: path, newPath })
+  })
+}
+
+/**
+ * Copy a file
+ * @param file
+ * @param newPath
+ * @returns
+ */
+export async function copyFile (file: FileItem, newPath: string): Promise<ApiResult<any>> {
+  const { path, repo } = file
+  return fetchHttp('/api/file', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo, oldPath: path, newPath })
   })
 }
 
 /**
  * Delete a file or dir.
  * @param file
+ * @param trash Move to trash or not, default is true.
  * @returns
  */
-export async function deleteFile (file: FileItem): Promise<ApiResult<any>> {
+export async function deleteFile (file: PathItem, trash = true): Promise<ApiResult<any>> {
   const { path, repo } = file
-  return fetchHttp(`/api/file?path=${encodeURIComponent(path)}&repo=${encodeURIComponent(repo)}`, { method: 'DELETE' })
+  return fetchHttp(`/api/file?path=${encodeURIComponent(path)}&repo=${encodeURIComponent(repo)}&trash=${trash}`, { method: 'DELETE' })
 }
 
-export async function fetchHistoryList (file: PathItem): Promise<{name: string, comment: string}[]> {
+export async function fetchHistoryList (file: PathItem): Promise<{size: number, list: {name: string, comment: string}[]}> {
   const { path, repo } = file
   const { data } = await fetchHttp(`/api/history/list?path=${encodeURIComponent(path)}&repo=${encodeURIComponent(repo)}`)
   return data
@@ -180,10 +227,13 @@ export async function commentHistoryVersion (file: PathItem, version: string, ms
 /**
  * Fetch file tree from a repository.
  * @param repo
+ * @param sort
+ * @param include
+ * @param noEmptyDir
  * @returns
  */
-export async function fetchTree (repo: string): Promise<Components.Tree.Node[]> {
-  const result = await fetchHttp(`/api/tree?repo=${encodeURIComponent(repo)}`)
+export async function fetchTree (repo: string, sort: FileSort, include?: string, noEmptyDir?: boolean): Promise<Components.Tree.Node[]> {
+  const result = await fetchHttp(`/api/tree?repo=${encodeURIComponent(repo)}&sort=${sort.by}-${sort.order}&include=${encodeURIComponent(include || '')}&noEmptyDir=${noEmptyDir || false}`)
   return result.data
 }
 
@@ -234,15 +284,112 @@ export async function choosePath (options: Record<string, any>): Promise<{ cance
   return result.data
 }
 
+type SearchReturn = (
+  onResult: (result: ISerializedFileMatch[]) => void | Promise<void>,
+  onMessage?: (message: IProgressMessage) => void | Promise<void>
+) => Promise<ISerializedSearchSuccess | null>
+
+async function readReader<R = any, S = any, M = any> (
+  reader: ReadableStreamDefaultReader,
+  onResult: (result: R) => void | Promise<void>,
+  onMessage?: (message: M) => void | Promise<void>
+): Promise<S | null> {
+  let val = ''
+
+  // read stream
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      return null
+    }
+
+    val += new TextDecoder().decode(value)
+
+    const idx = val.lastIndexOf('\n')
+    if (idx === -1) {
+      continue
+    }
+
+    const lines = val.slice(0, idx)
+    val = val.slice(idx + 1)
+
+    for (const line of lines.split('\n')) {
+      const data = JSON.parse(line)
+
+      switch (data.type) {
+        case 'result':
+          await onResult(data.payload)
+          break
+        case 'message':
+          await onMessage?.(data.payload)
+          break
+        case 'done':
+          return data.payload
+        default:
+          throw data.payload
+      }
+    }
+  }
+}
+
 /**
- * Search in a repository.
- * @param repo
- * @param text
+ * Search files.
+ * @param controller
+ * @param query
  * @returns
  */
-export async function search (repo: string, text: string): Promise<Pick<Doc, 'repo' | 'type' | 'path' | 'name'>> {
-  const result = await fetchHttp(`/api/search?repo=${encodeURIComponent(repo)}&search=${encodeURIComponent(text)}`)
-  return result.data
+export async function search (controller: AbortController, query: ITextQuery): Promise<SearchReturn> {
+  const response = await fetchHttp('/api/search', {
+    signal: controller.signal,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query })
+  })
+
+  return async function (onResult, onMessage) {
+    const reader: ReadableStreamDefaultReader = response.body.getReader()
+    return readReader<ISerializedFileMatch[], ISerializedSearchSuccess, IProgressMessage>(
+      reader,
+      onResult,
+      onMessage
+    )
+  }
+}
+
+/**
+ * Watch file or dir.
+ * @param controller
+ * @param query
+ * @returns
+ */
+export async function watchFs (
+  repo: string,
+  path: string | string[],
+  options: WatchOptions & { mdContent?: boolean, mdFilesOnly?: boolean },
+  onResult: (result: { eventName: 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir', path: string, content?: string | null, stats?: Stats } | { eventName: 'ready' }) => void,
+  onError: (error: Error) => void
+) {
+  const controller: AbortController = new AbortController()
+
+  const response = await fetchHttp('/api/watch-file', {
+    signal: controller.signal,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo, path, options })
+  })
+
+  const reader: ReadableStreamDefaultReader = response.body.getReader()
+  const result: Promise<string | null> = readReader(reader, onResult)
+
+  result.catch(error => {
+    if (!error?.message?.includes('abort')) {
+      onError(error)
+    }
+  })
+
+  const abort = () => controller.abort()
+
+  return { result, abort }
 }
 
 /**
@@ -250,12 +397,14 @@ export async function search (repo: string, text: string): Promise<Pick<Doc, 're
  * @param repo
  * @param fileBase64Url
  * @param filePath
+ * @param ifExists
  */
-export async function upload (repo: string, fileBase64Url: string, filePath: string): Promise<ApiResult<any>> {
+export async function upload (repo: string, fileBase64Url: string, filePath: string, ifExists: 'rename' | 'overwrite' | 'skip' | 'error' = 'rename'): Promise<ApiResult<{ path: string, hash: string }>> {
   const formData = new FormData()
   formData.append('repo', repo)
   formData.append('path', filePath)
   formData.append('attachment', fileBase64Url)
+  formData.append('exists', ifExists)
 
   return fetchHttp('/api/attachment', { method: 'POST', body: formData })
 }
@@ -296,6 +445,57 @@ export async function deleteTmpFile (name: string): Promise<ApiResult<any>> {
 }
 
 /**
+ * List user dir.
+ * @param name
+ * @returns
+ */
+export async function listUserDir (name: string, recursive = false): Promise<{
+  name: string,
+  path: string,
+  parent: string,
+  isFile: boolean,
+  isDir: boolean,
+}[]> {
+  const result = await fetchHttp(`/api/user-dir?name=${encodeURIComponent(name)}&recursive=${recursive}`)
+  return result.data
+}
+
+/**
+ * Write user file.
+ * @param name
+ * @param data
+ * @param asBase64
+ * @returns
+ */
+export async function writeUserFile (name: string, data: string, asBase64 = false): Promise<ApiResult<{ path: string }>> {
+  return fetchHttp(
+    `/api/user-file?name=${encodeURIComponent(name)}${asBase64 ? '&asBase64=true' : ''}`,
+    { method: 'post', body: data }
+  )
+}
+
+/**
+ * Read user file.
+ * @param name
+ * @returns
+ */
+export async function readUserFile (name: string): Promise<Response> {
+  return fetchHttp(`/api/user-file?name=${encodeURIComponent(name)}`)
+}
+
+/**
+ * Remove user file.
+ * @param name
+ * @returns
+ */
+export async function deleteUserFile (name: string): Promise<ApiResult<any>> {
+  return fetchHttp(
+    `/api/user-file?name=${encodeURIComponent(name)}`,
+    { method: 'delete' }
+  )
+}
+
+/**
  * Convert file
  * @param source
  * @param fromType
@@ -320,17 +520,21 @@ export async function convertFile (
  * Run code.
  * @param cmd
  * @param code
- * @param outputStream
+ * @param opts
  * @returns result
  */
-export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, outputStream: true): Promise<ReadableStreamDefaultReader>
-export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, outputStream?: false): Promise<string>
-export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, outputStream = false): Promise<ReadableStreamDefaultReader | string> {
+export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, opts?: { stream?: boolean, signal?: AbortSignal }): Promise<ReadableStreamDefaultReader>
+export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, opts?: { stream?: boolean, signal?: AbortSignal }): Promise<string>
+export async function runCode (cmd: string | { cmd: string, args: string[] }, code: string, opts?: { stream?: boolean, signal?: AbortSignal }): Promise<ReadableStreamDefaultReader | string> {
   const response = await fetchHttp('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cmd, code })
+    body: JSON.stringify({ cmd, code }),
+    signal: opts?.signal
   })
+
+  // compatible with old version
+  const outputStream = typeof opts === 'boolean' ? opts : opts?.stream
 
   if (outputStream) {
     return response.body.getReader()
@@ -358,23 +562,56 @@ export async function rpc (code: string) {
   return data
 }
 
+/**
+ * Fetch installed extensions
+ * @returns
+ */
 export async function fetchInstalledExtensions (): Promise<{id: string, enabled: boolean, isDev?: boolean}[]> {
   const { data } = await fetchHttp('/api/extensions')
   return data
 }
 
+/**
+ * Install extension
+ * @param id
+ * @param url
+ * @returns
+ */
 export async function installExtension (id: string, url: string): Promise<any> {
   return fetchHttp(`/api/extensions/install?id=${encodeURIComponent(id)}&url=${encodeURIComponent(url)}`, { method: 'POST' })
 }
 
+/**
+ * Abort extension installation
+ * @returns
+ */
+export async function abortExtensionInstallation (): Promise<any> {
+  return fetchHttp('/api/extensions/abort-installation', { method: 'DELETE' })
+}
+
+/**
+ * Uninstall extension
+ * @param id
+ * @returns
+ */
 export async function uninstallExtension (id: string): Promise<any> {
   return fetchHttp(`/api/extensions/uninstall?id=${encodeURIComponent(id)}`, { method: 'POST' })
 }
 
+/**
+ * Enable extension
+ * @param id
+ * @returns
+ */
 export async function enableExtension (id: string): Promise<any> {
   return fetchHttp(`/api/extensions/enable?id=${encodeURIComponent(id)}`, { method: 'POST' })
 }
 
+/**
+ * Disable extension
+ * @param id
+ * @returns
+ */
 export async function disableExtension (id: string): Promise<any> {
   return fetchHttp(`/api/extensions/disable?id=${encodeURIComponent(id)}`, { method: 'POST' })
 }

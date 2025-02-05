@@ -1,13 +1,17 @@
-import { defineComponent, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { debounce } from 'lodash-es'
 import Renderer from 'markdown-it/lib/renderer'
 import { Plugin } from '@fe/context'
-import { downloadDataURL, getLogger, strToBase64 } from '@fe/utils'
+import { downloadDataURL, getLogger, strToBase64, waitCondition } from '@fe/utils'
 import { openWindow } from '@fe/support/env'
 import * as storage from '@fe/utils/storage'
 import { buildSrc } from '@fe/support/embed'
+import store from '@fe/support/store'
 import { registerHook, removeHook } from '@fe/core/hook'
 import { t } from '@fe/services/i18n'
+import { getRenderIframe } from '@fe/services/view'
+import { DOM_ATTR_NAME, DOM_CLASS_NAME } from '@fe/support/args'
+import type { ExportType } from '@fe/types'
 
 const logger = getLogger('markdown-mind-map')
 
@@ -16,29 +20,40 @@ let links = ''
 
 let mindMapId = 0
 const instances = new Map()
+let window: any // render iframe content window
+let document: any // render iframe content document
 
-// kityminder has memory leak at CustomEvent, make CustomEvent readonly
-const CustomEvent = window.CustomEvent
-Object.defineProperty(window, 'CustomEvent', {
-  get: () => CustomEvent,
-  set: () => undefined
-})
+async function processRenderWindow () {
+  window = (await getRenderIframe()).contentWindow!
+  document = window.document
 
-Object.defineProperty(window, 'kity', {
-  get: () => {
-    logger.debug('new kity')
-    return window.kityM()
-  },
-})
+  // kityminder has memory leak at CustomEvent, make CustomEvent readonly
+  const CustomEvent = window.CustomEvent
+  Object.defineProperty(window, 'CustomEvent', {
+    get: () => CustomEvent,
+    set: () => undefined
+  })
 
-Object.defineProperty(window, 'kityminder', {
-  get: () => {
-    logger.debug('new kityminder')
-    return window.kityminderM()
-  },
-})
+  Object.defineProperty(window, 'kity', {
+    get: () => {
+      logger.debug('new kity')
+      return window.kityM()
+    },
+  })
 
-function newMinder () {
+  Object.defineProperty(window, 'kityminder', {
+    get: () => {
+      logger.debug('new kityminder')
+      return window.kityminderM && window.kityminderM()
+    },
+  })
+}
+
+processRenderWindow()
+
+async function newMinder () {
+  await waitCondition(() => !!(window.kityminder?.Minder))
+
   // hack addEventListener, fix memory leak.
   const realAddEventListener = window.addEventListener.bind(window)
   const events: {type: string, listener: any}[] = []
@@ -48,7 +63,8 @@ function newMinder () {
     realAddEventListener(type, listener)
   }
 
-  const km = new window.kityminder.Minder()
+  const kityminder = window.kityminder
+  const km = new kityminder.Minder()
 
   // restore addEventListener
   window.addEventListener = realAddEventListener
@@ -249,7 +265,7 @@ const buildSrcdoc = (json: string, btns: string) => {
   `
 }
 
-const init = (ele: HTMLElement) => {
+const init = async (ele: HTMLElement) => {
   const div = document.createElement('div')
   div.setAttribute('minder-data-type', 'text')
   div.style.position = 'relative'
@@ -258,7 +274,7 @@ const init = (ele: HTMLElement) => {
   ele.innerHTML = ''
   ele.appendChild(div)
 
-  const km = newMinder()
+  const km = await newMinder()
 
   km.setup(div)
   km.disable()
@@ -353,6 +369,8 @@ const init = (ele: HTMLElement) => {
 }
 
 const render = async (km: any, content: string) => {
+  if (!km) return
+
   let code = (content || '').trim()
 
   try {
@@ -366,7 +384,7 @@ const render = async (km: any, content: string) => {
     await km.importData('text', code)
   } catch (error) {
     await km.importData('text', t('mind-map.convert-error'))
-    km.execCommand('camera')
+    km?.execCommand('camera')
   }
 }
 
@@ -382,19 +400,20 @@ const MindMap = defineComponent({
   setup (props) {
     const id = `mind-map-${mindMapId++}`
     const container = ref<HTMLElement>()
+    const img = ref('')
 
     let km: any = null
-    const renderMindMap = debounce(() => {
+    const renderMindMap = debounce(async () => {
       if (!container.value) {
         return
       }
 
       if (!km) {
-        km = init(container.value)
+        km = await init(container.value)
         km.disableAnimationAwhile(async () => {
           await render(km, props.content)
-          km.execCommand('hand')
-          km.execCommand('camera')
+          km?.execCommand('hand')
+          km?.execCommand('camera')
         })
         instances.set(id, km)
       } else {
@@ -408,34 +427,69 @@ const MindMap = defineComponent({
       instances.delete(id)
     }
 
-    function onLanguageChange () {
+    function reload () {
       clean()
       renderMindMap()
     }
 
+    async function beforePrint ({ type }: { type: ExportType }) {
+      if (type === 'print' || type === 'pdf') {
+        const svg = await km.exportData('svg')
+        img.value = 'data:image/svg+xml;base64,' + strToBase64(svg)
+      }
+    }
+
+    function afterPrint () {
+      img.value = ''
+    }
+
     watch(() => props.content, renderMindMap)
+
+    watch(() => store.state.showView, (visible) => {
+      if (visible) {
+        nextTick(reload)
+      }
+    })
 
     onMounted(() => setTimeout(renderMindMap, 0))
 
-    registerHook('I18N_CHANGE_LANGUAGE', onLanguageChange)
+    registerHook('I18N_CHANGE_LANGUAGE', reload)
+    registerHook('EXPORT_BEFORE_PREPARE', beforePrint)
+    registerHook('EXPORT_AFTER_PREPARE', afterPrint)
     onBeforeUnmount(() => {
       clean()
-      removeHook('I18N_CHANGE_LANGUAGE', onLanguageChange)
+      removeHook('I18N_CHANGE_LANGUAGE', reload)
+      removeHook('EXPORT_BEFORE_PREPARE', beforePrint)
+      removeHook('EXPORT_AFTER_PREPARE', afterPrint)
     })
 
     let focused = false
 
-    return () => h('div', {
-      id,
-      ref: container,
-      class: 'mind-map reduce-brightness',
-      tabIndex: -1,
-      onClickCapture: () => { container.value?.focus() },
-      onFocus: () => { focused = true },
-      onBlur: () => { focused = false },
-      onMousewheelCapture: (e: WheelEvent) => { !focused && e.stopPropagation() },
-      ...props.attrs,
-    })
+    const className = [
+      'mind-map',
+      DOM_CLASS_NAME.REDUCE_BRIGHTNESS,
+      DOM_CLASS_NAME.SKIP_EXPORT,
+      DOM_CLASS_NAME.SKIP_PRINT,
+    ].join(' ')
+
+    return () => [
+      img.value ? h('p', { ...props.attrs }, h('img', {
+        src: img.value,
+        [DOM_ATTR_NAME.ONLY_CHILD]: true,
+      })) : null,
+      h('div', {
+        id,
+        ref: container,
+        class: className,
+        [DOM_ATTR_NAME.DISPLAY_NONE]: img.value ? true : undefined,
+        tabIndex: -1,
+        onClickCapture: () => { container.value?.focus() },
+        onFocus: () => { focused = true },
+        onBlur: () => { focused = false },
+        onMousewheelCapture: (e: WheelEvent) => { !focused && e.stopPropagation() },
+        ...props.attrs,
+      })
+    ]
   }
 })
 
@@ -457,7 +511,7 @@ const renderRule: Renderer.RenderRule = (tokens, idx, options, { bMarks, source 
 export default {
   name: 'markdown-mind-map',
   register: ctx => {
-    ctx.theme.addStyles(`
+    ctx.view.addStyles(`
       .markdown-view .markdown-body .mind-map {
         overflow: hidden;
       }
@@ -482,25 +536,19 @@ export default {
       }
     `)
 
-    ctx.markdown.registerPlugin(md => {
+    async function injectScripts () {
+      const style = await ctx.view.addStyleLink('/kity/kityminder.core.css')
+      const script1 = await ctx.view.addScript('/kity/kity.min.js')
+      script1.onload = async () => {
+        const script2 = await ctx.view.addScript('/kity/kityminder.core.min.js')
+        links = [style.outerHTML, script1.outerHTML, script2.outerHTML].join('\n')
+      }
+    }
+
+    injectScripts()
+
+    ctx.markdown.registerPlugin(async md => {
       md.renderer.rules.bullet_list_open = renderRule
-
-      const style = document.createElement('link')
-      style.rel = 'stylesheet'
-      style.href = '/kity/kityminder.core.css'
-      document.getElementsByTagName('head')[0].appendChild(style)
-
-      const script1 = document.createElement('script')
-      script1.src = '/kity/kity.min.js'
-      script1.async = false
-      document.body.appendChild(script1)
-
-      const script2 = document.createElement('script')
-      script2.src = '/kity/kityminder.core.min.js'
-      script2.async = false
-      document.body.appendChild(script2)
-
-      links = [style.outerHTML, script1.outerHTML, script2.outerHTML].join('\n')
     })
 
     ctx.registerHook('VIEW_ON_GET_HTML_FILTER_NODE', async ({ node, options }) => {
@@ -509,6 +557,7 @@ export default {
         if (km) {
           const img = document.createElement('img')
           img.alt = 'mind-map'
+          img.setAttribute(DOM_ATTR_NAME.ONLY_CHILD, 'true')
 
           if (options.preferPng) {
             img.src = await km.exportData('png')
@@ -517,9 +566,21 @@ export default {
             img.src = 'data:image/svg+xml;base64,' + ctx.utils.strToBase64(svg)
           }
 
-          node.outerHTML = img.outerHTML
+          const p = document.createElement('p')
+          Object.assign(p.dataset, node.dataset)
+          p.appendChild(img)
+
+          node.outerHTML = p.outerHTML
         }
       }
+    })
+
+    ctx.editor.tapSimpleCompletionItems(items => {
+      /* eslint-disable no-template-curly-in-string */
+
+      items.push(
+        { label: '/ + MindMap', insertText: '+ ${1:Subject}{.mindmap}\n    + ${2:Topic}', block: true },
+      )
     })
   }
 } as Plugin

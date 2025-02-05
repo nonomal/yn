@@ -1,56 +1,84 @@
 <template>
-  <XMask :show="show" @close="callback = null">
-    <QuickOpen @choose-file="chooseFile" @close="callback = null" :with-marked="withMarked"></QuickOpen>
+  <XMask :show="show" @close="close">
+    <QuickOpen
+      @choose-file="chooseFile"
+      @close="close"
+      :filter-item="filterItem"
+      :only-current-repo="onlyCurrentRepo" />
   </XMask>
 </template>
 
 <script lang="ts">
-import { computed, defineComponent, onMounted, onUnmounted, ref } from 'vue'
-import type { Doc } from '@fe/types'
+import { computed, defineComponent, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import { registerAction, removeAction } from '@fe/core/action'
-import { CtrlCmd } from '@fe/core/command'
+import { CtrlCmd } from '@fe/core/keybinding'
 import { switchDoc } from '@fe/services/document'
+import { t } from '@fe/services/i18n'
+import type { Doc, BaseDoc } from '@fe/types'
 import XMask from './Mask.vue'
 import QuickOpen from './QuickOpen.vue'
+import { isMarkdownFile } from '@share/misc'
 
 export default defineComponent({
   name: 'x-filter',
   components: { QuickOpen, XMask },
   setup () {
-    const callback = ref<Function | null>(null)
-    const withMarked = ref(true)
+    const callback = ref<((doc: Doc | null) => void) | null>(null)
+    const onlyCurrentRepo = ref(false)
+    const filterItem = shallowRef<(item: BaseDoc) => boolean>()
 
     function showQuickOpen () {
-      withMarked.value = true
-      callback.value = (f: any) => {
-        switchDoc(f)
+      onlyCurrentRepo.value = false
+      callback.value = (f: Doc | null) => {
+        if (f) {
+          switchDoc(f)
+        }
+
         callback.value = null
+        filterItem.value = undefined
       }
     }
 
-    function chooseFile (file: any) {
+    function chooseFile (file: Doc | null) {
       if (callback.value) {
         callback.value(file)
       }
     }
 
-    function chooseDocument () {
-      return new Promise<Doc>(resolve => {
-        callback.value = (f: Doc) => {
+    function chooseDocument (filter = (item: BaseDoc) => isMarkdownFile(item.path)) {
+      return new Promise<Doc | null>(resolve => {
+        callback.value = (f: Doc | null) => {
           resolve(f)
           callback.value = null
+          filterItem.value = undefined
         }
-        withMarked.value = false
+
+        onlyCurrentRepo.value = true
+        filterItem.value = filter
       })
     }
 
+    function close () {
+      if (callback.value) {
+        callback.value(null)
+      }
+
+      callback.value = null
+    }
+
     onMounted(() => {
-      registerAction({ name: 'filter.show-quick-open', handler: showQuickOpen, keys: [CtrlCmd, 'p'] })
+      registerAction({
+        name: 'workbench.show-quick-open',
+        description: t('command-desc.workbench_show-quick-open'),
+        handler: showQuickOpen,
+        forUser: true,
+        keys: [CtrlCmd, 'p']
+      })
       registerAction({ name: 'filter.choose-document', handler: chooseDocument })
     })
 
     onUnmounted(() => {
-      removeAction('filter.show-quick-open')
+      removeAction('workbench.show-quick-open')
       removeAction('filter.choose-document')
     })
 
@@ -58,9 +86,11 @@ export default defineComponent({
 
     return {
       show,
+      close,
       callback,
       chooseFile,
-      withMarked,
+      onlyCurrentRepo,
+      filterItem,
     }
   },
 })

@@ -7,7 +7,7 @@
     @keydown.up.exact="selectItem(-1)"
     @keydown.down.exact="selectItem(1)"
     @click.stop>
-    <div class="tab">
+    <div class="tab" v-if="tabs.length > 1">
       <div
         v-for="tab in tabs"
         :key="tab.key"
@@ -16,6 +16,7 @@
     </div>
     <input
       ref="refInput"
+      v-auto-focus="{ delay: 0 }"
       v-model="searchText"
       type="text"
       class="input"
@@ -28,14 +29,21 @@
       <template v-else>
         <li
           v-for="(item, i) in dataList"
-          :key="item.repo + item.path"
-          :class="{selected: selected === item}"
+          :key="item.type + item.repo + item.path"
+          :class="{
+            selected: isEqual(item, selected),
+            marked: isMarked(item)
+          }"
+          @mouseover="!disableMouseover && updateSelected(item)"
           @click="chooseItem(item)">
-          <span :ref="el => refFilename[i] = el">
+          <span :ref="(el: any) => refFilename[i] = el">
             {{item.name}}
           </span>
-          <span :ref="el => refFilepath[i] = el" class="path">
-            [{{item.repo}}] {{item.path.substr(0, item.path.lastIndexOf('/'))}}
+          <span class="path">
+            <span v-if="currentTab === 'marked'">[{{item.repo}}]</span> <span :ref="(el: any) => refFilepath[i] = el">
+              {{item.path.slice(0, item.path.lastIndexOf('/'))}}
+              <!-- {{ item._score }} -->
+            </span>
           </span>
         </li>
         <li v-if="dataList.length < 1">{{$t('quick-open.empty')}}</li>
@@ -45,68 +53,70 @@
 </template>
 
 <script lang="ts">
-import { debounce } from 'lodash-es'
-import { computed, defineComponent, nextTick, onMounted, ref, toRefs, watch } from 'vue'
-import { useStore } from 'vuex'
-import * as api from '@fe/support/api'
+import { cloneDeep } from 'lodash-es'
+import { computed, defineComponent, nextTick, onMounted, ref, shallowRef, toRefs, watch } from 'vue'
 import { useI18n } from '@fe/services/i18n'
-import fuzzyMatch from '@fe/others/fuzzy-match'
+import { fuzzyMatch } from '@fe/others/fuzzy-match'
 import { fetchSettings } from '@fe/services/setting'
-import { PathItem } from '@fe/types'
+import { getMarkedFiles, isMarked, supported } from '@fe/services/document'
+import store from '@fe/support/store'
+import type { BaseDoc, Components } from '@fe/types'
 
-type TabKey = 'marked' | 'search' | 'file'
+type TabKey = 'marked' | 'file' | 'command'
 
 let lastTab: TabKey = 'marked'
-let markedFilesCache: PathItem[] = []
+let markedFilesCache: BaseDoc[] = []
 
 export default defineComponent({
   name: 'quick-open',
   props: {
-    withMarked: {
+    onlyCurrentRepo: {
       type: Boolean,
       default: true,
+    },
+    filterItem: {
+      type: Function as unknown as () => (item : BaseDoc) => boolean,
+      default: () => () => true,
     },
   },
   setup (props, { emit }) {
     const { t } = useI18n()
-    const store = useStore()
 
     const refInput = ref<HTMLInputElement | null>(null)
     const refResult = ref<HTMLUListElement | null>(null)
     const refFilename = ref<HTMLElement[]>([])
     const refFilepath = ref<HTMLElement[]>([])
-    const markedFiles = ref<PathItem[]>(markedFilesCache)
+    const markedFiles = ref<BaseDoc[]>(markedFilesCache)
 
-    const { currentRepo, recentOpenTime, tree } = toRefs(store.state)
+    const { recentOpenTime, tree } = toRefs(store.state)
 
-    const selected = ref<any>(null)
+    const selected = ref<BaseDoc | null>(null)
     const searchText = ref('')
     const currentTab = ref<TabKey>(lastTab)
-    const list = ref<any>([])
-    const lastFetchTime = ref(0)
-
-    const repo = computed(() => currentRepo.value?.name)
+    const list = shallowRef<BaseDoc[] | null>([])
+    const disableMouseover = ref(false)
 
     const tabs = computed(() => {
       const arr: {key: TabKey; label: string}[] = [
+        { key: 'marked', label: t('quick-open.marked') },
         { key: 'file', label: t('quick-open.files') },
-        { key: 'search', label: t('quick-open.search') },
       ]
-
-      if (props.withMarked) {
-        arr.unshift({ key: 'marked', label: t('quick-open.marked') })
-      }
 
       return arr
     })
 
     const files = computed(() => {
-      const travelFiles = (tree: any) => {
-        let tmp: any[] = []
+      const travelFiles = (tree: Components.Tree.Node[]) => {
+        let tmp: BaseDoc[] = []
 
-        tree.forEach((node: any) => {
-          if (node.type === 'file' && node.path.endsWith('.md')) {
-            tmp.push(node)
+        tree.forEach((node) => {
+          if (supported(node)) {
+            tmp.push({
+              name: node.name,
+              path: node.path,
+              repo: node.repo,
+              type: node.type
+            })
           }
 
           if (Array.isArray(node.children)) {
@@ -120,14 +130,10 @@ export default defineComponent({
       return travelFiles(tree.value || [])
     })
 
-    function sortList (list: any) {
-      if (list === null) {
-        return
-      }
-
+    function sortList (list: BaseDoc[]) {
       const map = (recentOpenTime.value || {})
 
-      return list.sort((a: any, b: any) => {
+      return list.sort((a, b) => {
         const at = map[`${a.repo}|${a.path}`] || 0
         const bt = map[`${b.repo}|${b.path}`] || 0
 
@@ -135,23 +141,33 @@ export default defineComponent({
       })
     }
 
-    function filterFiles (files: any[], search: string, fuzzy: boolean) {
+    function filterFiles (files: BaseDoc[], search: string, fuzzy: boolean) {
       if (!fuzzy) {
         search = search.toLowerCase()
         return files.filter(x => x.path.toLowerCase().indexOf(search) > -1)
       }
 
-      const tmp: any[] = []
+      type Item = (BaseDoc & { _score: number })
+      const tmp: Item[] = []
 
       files.forEach(x => {
-        const result = fuzzyMatch(search, x.path)
+        if (x.name) {
+          const nameResult = fuzzyMatch(search, x.name)
+          if (nameResult.matched) {
+            ;(x as Item)._score = nameResult.score * 10000
+            tmp.push(x as Item)
+            return
+          }
+        }
 
-        if (result.matched) {
-          tmp.push({ ...x })
+        const pathResult = fuzzyMatch(search, x.path)
+        if (pathResult.matched) {
+          ;(x as Item)._score = pathResult.score
+          tmp.push(x as Item)
         }
       })
 
-      return tmp.sort((a, b) => b.score - a.score)
+      return tmp.sort((a, b) => b._score - a._score)
     }
 
     const dataList = computed(() => {
@@ -159,26 +175,29 @@ export default defineComponent({
         return null
       }
 
-      // filter except full text search.
-      const arr = currentTab.value === 'search' ? list.value : filterFiles(list.value, searchText.value.trim(), false)
+      const data = list.value
 
-      // sort by last usage time.
-      return sortList(arr).slice(0, 70)
+      const currentRepoName = store.state.currentRepo?.name
+      const search = searchText.value.trim()
+
+      const result = search ? filterFiles(data, search, true) : sortList(data)
+
+      const limit = 70
+      const filteredResult = []
+
+      for (const item of result) {
+        if (filteredResult.length >= limit) break
+        if (props.filterItem(item) && (props.onlyCurrentRepo ? item.repo === currentRepoName : true)) {
+          filteredResult.push(item)
+        }
+      }
+
+      return filteredResult
     })
 
-    const searchWithDebounce = debounce(async (text: string, call: Function) => {
-      if (repo.value && text.trim()) {
-        const fetchTime = new Date().getTime()
-        lastFetchTime.value = fetchTime
-        const data = await api.search(repo.value, text.trim())
-        // ensure last result be ahead of list.
-        if (fetchTime >= lastFetchTime.value) {
-          call(data)
-        }
-      } else {
-        call([])
-      }
-    }, 500)
+    function isEqual (a: BaseDoc | null, b: BaseDoc | null) {
+      return a?.type === b?.type && a?.repo === b?.repo && a?.path === b?.path
+    }
 
     function highlightText (search: string) {
       if (refFilename.value && refFilepath.value) {
@@ -192,7 +211,7 @@ export default defineComponent({
         const openR = new RegExp(escape(openF), 'g')
         const closeR = new RegExp(escape(closeF), 'g')
 
-        ;(refFilename.value || []).concat(refFilepath.value || []).forEach(function (it: any) {
+        ;(refFilename.value || []).concat(refFilepath.value || []).forEach((it) => {
           if (!it) {
             return
           }
@@ -218,20 +237,11 @@ export default defineComponent({
       if (currentTab.value === 'file') {
         list.value = files.value
       } else if (currentTab.value === 'marked') {
-        list.value = markedFiles.value
-      } else if (currentTab.value === 'search') {
-        const keyword = searchText.value.trim()
-        list.value = keyword ? null : []
-
-        searchWithDebounce(keyword, (data: any[]) => {
-          if (currentTab.value === 'search') {
-            list.value = data
-          }
-        })
+        list.value = cloneDeep(markedFiles.value)
       }
     }
 
-    function updateSelected (item: any = null) {
+    function updateSelected (item: BaseDoc | null = null) {
       if (dataList.value === null) {
         return
       }
@@ -258,7 +268,7 @@ export default defineComponent({
         return
       }
 
-      const currentIndex = dataList.value.findIndex((x: any) => selected.value === x)
+      const currentIndex = dataList.value.findIndex((x) => isEqual(x, selected.value))
 
       let index = currentIndex + inc
       if (index > dataList.value.length - 1) {
@@ -270,10 +280,10 @@ export default defineComponent({
       updateSelected(dataList.value[index])
     }
 
-    function chooseItem (item: any = null) {
+    function chooseItem (item: BaseDoc | null = null) {
       const file = item || selected.value
       if (file) {
-        emit('choose-file', file)
+        emit('choose-file', { ...file } satisfies BaseDoc)
       }
     }
 
@@ -289,19 +299,19 @@ export default defineComponent({
       currentTab.value = arr[index > -1 ? index : arr.length - 1] || arr[0]
     }
 
-    watch(() => props.withMarked, val => {
-      if (!val && currentTab.value === 'marked') {
-        currentTab.value = 'file'
-      }
-    }, { immediate: true })
-
     watch(searchText, () => updateDataSource())
 
-    watch(dataList, () => {
-      updateSelected()
-      if (currentTab.value !== 'search') { // search model do not highlight text.
-        nextTick(() => highlightText(searchText.value.trim()))
+    watch(dataList, val => {
+      if (val?.length) {
+        disableMouseover.value = true
+        setTimeout(() => {
+          disableMouseover.value = false
+        }, 0)
       }
+
+      updateSelected()
+
+      nextTick(() => highlightText(searchText.value.trim()))
     })
 
     watch(currentTab, (val) => {
@@ -314,8 +324,8 @@ export default defineComponent({
     onMounted(async () => {
       refInput.value!.focus()
       updateDataSource()
-      const settings = await fetchSettings()
-      markedFilesCache = settings.mark || []
+      await fetchSettings()
+      markedFilesCache = getMarkedFiles()
       markedFiles.value = markedFilesCache
       updateDataSource()
     })
@@ -323,8 +333,8 @@ export default defineComponent({
     return {
       refInput,
       refResult,
-      refFilename: refFilename as any,
-      refFilepath: refFilepath as any,
+      refFilename,
+      refFilepath,
       tabs,
       currentTab,
       searchText,
@@ -333,6 +343,10 @@ export default defineComponent({
       selectItem,
       chooseItem,
       switchTab,
+      updateSelected,
+      disableMouseover,
+      isMarked,
+      isEqual,
     }
   },
 })
@@ -350,7 +364,7 @@ export default defineComponent({
 }
 
 .result {
-  max-height: 300px;
+  max-height: min(calc(100vh - 260px), 300px);
   overflow-y: auto;
   list-style: none;
   padding: 0;
@@ -358,20 +372,25 @@ export default defineComponent({
 }
 
 .result li {
-  color: var(--g-color-40);
+  color: var(--g-color-30);
   line-height: 1.5em;
   font-size: 18px;
-  padding: 2px;
-  transition: all .1s ease-in-out;
-  cursor: pointer;
+  padding: 2px 6px;
+  user-select: none;
   border-radius: var(--g-border-radius);
+  font-variant-numeric: tabular-nums;
 }
 
-.result li.selected,
-.result li:hover {
-  padding: 2px 6px;
+.result li.selected {
   background: var(--g-color-active-a);
-  color: var(--g-color-10);
+  color: var(--g-color-2);
+}
+
+.result li.marked::after {
+  content: '★';
+  margin-left: 4px;
+  font-size: 12px;
+  vertical-align: text-top;
 }
 
 .result li span {
@@ -385,8 +404,7 @@ export default defineComponent({
 }
 
 .result li span.path ::v-deep(b) {
-  color: var(--g-color-5);
-  font-weight: bold;
+  font-weight: 500;
 }
 
 .result li ::v-deep(b) {
@@ -412,7 +430,7 @@ export default defineComponent({
   background: var(--g-color-active-d);;
   cursor: pointer;
   transition: all .1s ease-in-out;
-  color: var(--g-color-10);
+  color: var(--g-color-0);
   border-right: 1px var(--g-color-80) solid;
 }
 
@@ -426,6 +444,8 @@ export default defineComponent({
 
 .tab > div.selected {
   background: var(--g-color-active-b);
+  font-weight: bold;
+  color: var(--g-color-0);
 }
 
 .input {

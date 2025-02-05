@@ -5,9 +5,12 @@ import type * as Monaco from 'monaco-editor'
 import type { Ctx, Plugin } from '@fe/context'
 import type { Components } from '@fe/types'
 import type Token from 'markdown-it/lib/token'
+import { MARKDOWN_FILE_EXT } from '@share/misc'
 
 enum CompletionContextKind {
   Link, // [...](|)
+
+  WikiLink, // [[|]]
 
   ReferenceLink, // [...][|]
 
@@ -60,7 +63,7 @@ interface CompletionContext {
 }
 
 class CompletionProvider implements Monaco.languages.CompletionItemProvider {
-  triggerCharacters = ['/', '#', '[']
+  triggerCharacters = ['/', ':', '#', '[']
 
   private readonly monaco: typeof Monaco
   private readonly ctx: Ctx
@@ -89,6 +92,7 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
       }
 
       case CompletionContextKind.LinkDefinition:
+      case CompletionContextKind.WikiLink:
       case CompletionContextKind.Link: {
         const items: Monaco.languages.CompletionItem[] = []
 
@@ -113,7 +117,7 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
         if (!isAnchorInCurrentDoc) {
           if (context.anchorInfo) { // Anchor to a different document
             const currentFile = this.ctx.store.state.currentFile
-            if (!currentFile || !context.anchorInfo.beforeAnchor.endsWith('.md')) {
+            if (!currentFile || !context.anchorInfo.beforeAnchor.endsWith(MARKDOWN_FILE_EXT)) {
               return { suggestions: [] }
             }
 
@@ -149,17 +153,20 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
   }
 
   /// [...](...|
-  private readonly linkStartPattern = /\[([^\]]*?)\]\(\s*([^\s()]*)$/;
+  private readonly linkStartPattern = /\[([^\]]*?)\]\(\s*([^\s()]*)$/
+
+  /// [[...|
+  private readonly wikiLinkStartPattern = /\[\[\s*([^[\]]*)$/
 
   /// [...|
-  private readonly referenceLinkStartPattern = /\[\s*([^\s[\]]*)$/;
+  private readonly referenceLinkStartPattern = /\[\s*([^\s[\]]*)$/
 
   /// [id]: |
-  private readonly definitionPattern = /^\s*\[[\w-]+\]:\s*([^\s]*)$/m;
+  private readonly definitionPattern = /^\s*\[[\w-]+\]:\s*([^\s]*)$/m
 
-  private readonly defPattern = /^([\t ]*\[(?!\^)((?:\\\]|[^\]])+)\]:\s*)([^<]\S*|<[^>]+>)/gm;
+  private readonly defPattern = /^([\t ]*\[(?!\^)((?:\\\]|[^\]])+)\]:\s*)([^<]\S*|<[^>]+>)/gm
 
-  private readonly angleBracketLinkRe = /^<(.*)>$/;
+  private readonly angleBracketLinkRe = /^<(.*)>$/
 
   private getPathCompletionContext (model: Monaco.editor.IModel, position: Monaco.Position): CompletionContext | undefined {
     const line = model.getLineContent(position.lineNumber)
@@ -179,6 +186,19 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
 
       return {
         kind: CompletionContextKind.Link,
+        linkPrefix: prefix,
+        linkTextStartPosition: position.delta(0, -prefix.length),
+        linkSuffix: suffix ? suffix[0] : '',
+        anchorInfo: this.getAnchorContext(prefix),
+      }
+    }
+
+    const wikiLinkPrefixMatch = linePrefixText.match(this.wikiLinkStartPattern)
+    if (wikiLinkPrefixMatch) {
+      const prefix = wikiLinkPrefixMatch[1]
+      const suffix = lineSuffixText.match(/^[^\]]*/)
+      return {
+        kind: CompletionContextKind.WikiLink,
         linkPrefix: prefix,
         linkTextStartPosition: position.delta(0, -prefix.length),
         linkSuffix: suffix ? suffix[0] : '',
@@ -230,24 +250,38 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
     if (!anchorMatch) {
       return undefined
     }
+
+    let beforeAnchor = anchorMatch[1]
+
+    if (anchorMatch[1] && !this.ctx.utils.path.extname(beforeAnchor)) {
+      beforeAnchor += MARKDOWN_FILE_EXT
+    }
+
     return {
-      beforeAnchor: anchorMatch[1],
+      beforeAnchor,
       anchorPrefix: anchorMatch[2],
     }
   }
 
   private async * providePathSuggestions (position: Monaco.Position, context: CompletionContext): AsyncIterable<Monaco.languages.CompletionItem> {
-    const valueBeforeLastSlash = context.linkPrefix.substring(0, context.linkPrefix.lastIndexOf('/') + 1) || '.' // keep the last slash
+    let idx = context.linkPrefix.lastIndexOf('/')
+
+    if (context.kind === CompletionContextKind.WikiLink) {
+      idx = Math.max(context.linkPrefix.lastIndexOf(':'), idx)
+    }
+
+    const valueBeforeLastSlash = context.linkPrefix.substring(0, idx + 1) // keep the last slash
 
     const currentFile = this.ctx.store.state.currentFile
     if (!currentFile) {
       return
     }
 
-    const parentDir = this.ctx.utils.path.resolve(
-      this.ctx.utils.path.dirname(currentFile.path),
-      valueBeforeLastSlash
-    )
+    const basePath = this.ctx.utils.path.dirname(currentFile.path)
+
+    const parentDir = context.kind === CompletionContextKind.WikiLink
+      ? this.ctx.utils.path.resolve(basePath, valueBeforeLastSlash.replace(/:/g, '/') || '.')
+      : this.ctx.utils.path.resolve(basePath, valueBeforeLastSlash || '.')
 
     const pathSegmentStart = position.delta(0, valueBeforeLastSlash.length - context.linkPrefix.length)
     const insertRange = new this.monaco.Range(
@@ -265,16 +299,24 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
       pathSegmentEnd.column,
     )
 
-    const items = this.getFileList(parentDir)
+    const items = await this.getFileList(parentDir)
 
     let i = 0
     for (const item of items) {
       i++
       const isDir = item.type === 'dir'
-      const label = isDir ? item.name + '/' : item.name
+      let label = isDir ? item.name + '/' : item.name
+      let insertText = this.ctx.utils.encodeMarkdownLink(label)
+
+      // Remove extension for wiki links
+      if (context.kind === CompletionContextKind.WikiLink) {
+        label = label.replace(/\.(md|markdown)$/, '')
+        insertText = label.replaceAll(']', '&#93;').replaceAll('[', '&#91;')
+      }
+
       yield {
-        label: label,
-        insertText: this.ctx.utils.encodeMarkdownLink(label),
+        label,
+        insertText,
         kind: isDir ? this.monaco.languages.CompletionItemKind.Folder : this.monaco.languages.CompletionItemKind.File,
         range: {
           insert: insertRange,
@@ -286,7 +328,7 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
     }
   }
 
-  private getFileList (parentDir: string): Components.Tree.Node[] {
+  private async getFileList (parentDir: string): Promise<Components.Tree.Node[]> {
     const result: Components.Tree.Node[] = []
 
     const traverseTree = (nodes: Components.Tree.Node[]) => {
@@ -303,7 +345,18 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
       })
     }
 
-    traverseTree(this.ctx.store.state.tree || [])
+    const repo = this.ctx.store.state.currentFile?.repo
+
+    if (!repo) {
+      return result
+    }
+
+    if (this.ctx.store.state.currentFile?.repo === this.ctx.store.state.currentRepo?.name) {
+      traverseTree(this.ctx.store.state.tree || [])
+    } else {
+      const tree = await this.ctx.api.fetchTree(repo, { by: 'name', order: 'asc' }, undefined, true)
+      traverseTree(tree)
+    }
 
     return result
   }
@@ -323,7 +376,7 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
       if (token.type === 'heading_open') {
         const nextToken = tokens[i + 1]
         if (nextToken && nextToken.content) {
-          const id = nextToken.content.trim().toLowerCase().replace(/\s+/g, '-')
+          const id = nextToken.content.trim().replace(/\s+/g, '-')
           yield {
             kind: this.monaco.languages.CompletionItemKind.Reference,
             label: '# ' + tokens[i].tag.toUpperCase() + ' ' + nextToken.content,
@@ -385,7 +438,7 @@ class CompletionProvider implements Monaco.languages.CompletionItemProvider {
         })
       } else {
         out.set(reference, {
-          link: link,
+          link,
         })
       }
     }

@@ -48,6 +48,8 @@ export async function transformProtocolRequest (request: ProtocolRequest) {
   if (body) {
     req.headers['content-length'] = body.length.toString()
     req._read = Readable.from(body)._read
+  } else {
+    req._read = () => req.push(null)
   }
 
   const out = new Transform({
@@ -57,9 +59,22 @@ export async function transformProtocolRequest (request: ProtocolRequest) {
     },
   })
 
-  const res = new ServerResponse(req)
-  res.write = out.write.bind(out)
-  res.end = out.end.bind(out)
+  const res = new Proxy(new ServerResponse(req), {
+    get (target, prop: keyof typeof out) {
+      const val = out[prop]
+      if (val && typeof val === 'function') {
+        return val.bind(out)
+      }
+
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore
+      return target[prop]
+    },
+  })
+
+  res.on('close', () => {
+    res.emit('finish')
+  })
 
   return { req, res, out }
 }

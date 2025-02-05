@@ -8,7 +8,8 @@ import { getActionHandler } from '@fe/core/action'
 import type { Extension, ExtensionCompatible, ExtensionLoadStatus, RegistryHostname } from '@fe/types'
 import * as i18n from '@fe/services/i18n'
 import * as theme from '@fe/services/theme'
-import { triggerHook } from '@fe/core/hook'
+import * as view from '@fe/services/view'
+import { registerHook, triggerHook } from '@fe/core/hook'
 import { FLAG_DEMO } from '@fe/support/args'
 
 const logger = getLogger('extension')
@@ -124,6 +125,7 @@ export async function getInstalledExtensions () {
 
       extensions.push({
         ...info,
+        installed: true,
         enabled: item.enabled && info.compatible.value,
         icon: getInstalledExtensionFileUrl(info.id, info.icon),
         readmeUrl: getInstalledExtensionFileUrl(info.id, 'README.md'),
@@ -140,11 +142,11 @@ export async function getRegistryExtensions (registry: RegistryHostname = 'regis
   logger.debug('getRegistryExtensions', registry)
 
   const registryUrl = `https://${registry}/yank-note-registry`
-  const registryJson = await api.proxyRequest(registryUrl, { timeout: 5000 }).then(r => r.json())
+  const registryJson = await api.proxyFetch(registryUrl, { timeout: 5000 }).then(r => r.json())
   const latest = registryJson['dist-tags'].latest
   const tarballUrl = changeRegistryOrigin(registry, registryJson.versions[latest].dist.tarball)
 
-  const extensions = await api.proxyRequest(tarballUrl, { timeout: 5000 })
+  const extensions = await api.proxyFetch(tarballUrl, { timeout: 5000 })
     .then(r => r.arrayBuffer())
     .then(data => pako.inflate(new Uint8Array(data)))
     .then(arr => arr.buffer)
@@ -175,6 +177,10 @@ export async function uninstall (extension: Pick<Extension, 'id'>) {
   await api.uninstallExtension(extension.id)
 }
 
+export async function abortInstallation () {
+  await api.abortExtensionInstallation()
+}
+
 export async function install (extension: Extension, registry: RegistryHostname = 'registry.npmjs.org') {
   const url = extension.dist.tarball
   if (!url) {
@@ -197,11 +203,17 @@ async function load (extension: Extension) {
     let pluginPromise: Promise<void> | undefined
 
     const main = extension?.main
-    if (!loadStatus.plugin && main && main.endsWith('.js')) {
+    if (!loadStatus.plugin && main && (main.endsWith('.js') || main.endsWith('.mjs'))) {
       pluginPromise = new Promise((resolve, reject) => {
         const script = window.document.createElement('script')
         script.src = getInstalledExtensionFileUrl(extension.id, main)
         script.defer = true
+
+        // support esm
+        if (main.endsWith('.mjs')) {
+          script.type = 'module'
+        }
+
         script.onload = () => {
           resolve()
           scriptEndTime = performance.now()
@@ -223,10 +235,14 @@ async function load (extension: Extension) {
 
     const style = extension?.style
     if (!loadStatus.style && style && style.endsWith('.css')) {
-      const link = window.document.createElement('link')
-      link.rel = 'stylesheet'
-      link.href = getInstalledExtensionFileUrl(extension.id, style)
-      window.document.head.appendChild(link)
+      const href = getInstalledExtensionFileUrl(extension.id, style)
+
+      // add style to workbench
+      theme.addStyleLink(href)
+
+      // also add style to preview iframe
+      view.addStyleLink(href)
+
       loadStatus.style = true
     }
 
@@ -260,6 +276,18 @@ let initialized = false
 
 export function getInitialized () {
   return initialized
+}
+
+export function whenInitialized (): Promise<void> {
+  return new Promise(resolve => {
+    if (initialized) {
+      resolve()
+    } else {
+      registerHook('EXTENSION_READY', () => {
+        resolve()
+      }, true)
+    }
+  })
 }
 
 /**

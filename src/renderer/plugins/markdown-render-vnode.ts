@@ -5,8 +5,24 @@ import { escapeHtml, unescapeAll } from 'markdown-it/lib/common/utils'
 import { DOM_ATTR_NAME } from '@fe/support/args'
 import type { Plugin } from '@fe/context'
 
+const sensitiveUrlReg = /^javascript:|vbscript:|file:/i
+const sensitiveAttrReg = /^href|src|xlink:href|poster|srcset$/i
 const attrNameReg = /^[a-zA-Z_:][a-zA-Z0-9:._-]*$/
+const attrEventReg = /^on/i
 const defaultRules = {} as any
+
+function onLeavepictureinpicture (e: Event) {
+  const target = e.target as HTMLMediaElement
+  if (!target.isConnected) {
+    target.pause()
+  } else {
+    (target as any).scrollIntoViewIfNeeded()
+  }
+}
+
+function validateAttrName (name: string) {
+  return attrNameReg.test(name) && !attrEventReg.test(name)
+}
 
 function getLine (token: Token, env?: Record<string, any>) {
   const [lineStart, lineEnd] = token.map || [0, 1]
@@ -28,9 +44,22 @@ function getLine (token: Token, env?: Record<string, any>) {
   return [lineStart + sOffset, lineEnd + sOffset]
 }
 
-export function setSourceLine (token: Token, env?: Record<string, any>) {
+function processToken (token: Token, env?: Record<string, any>) {
   if (!token.meta) {
     token.meta = {}
+  }
+
+  if (env?.safeMode) {
+    token.attrs?.forEach(([name, val]) => {
+      name = name.toLowerCase()
+      if (sensitiveAttrReg.test(name) && sensitiveUrlReg.test(val)) {
+        token.attrSet(name, '')
+      }
+
+      if (name === 'href' && val.toLowerCase().startsWith('data:')) {
+        token.attrSet(name, '')
+      }
+    })
   }
 
   if (token.block) {
@@ -45,10 +74,7 @@ export function setSourceLine (token: Token, env?: Record<string, any>) {
 
       // transform array to object
       token.attrs?.forEach(([name, val]) => {
-        // filter attrs
-        if (attrNameReg.test(name)) {
-          token.meta.attrs[name] = val
-        }
+        token.meta.attrs[name] = val
       })
     }
   }
@@ -152,6 +178,16 @@ defaultRules.image = function (tokens: Token[], idx: number, options: any, env: 
   }, [])
 }
 
+defaultRules.media = function (tokens: Token[], idx: number, _options: any, _env: any, slf: Renderer) {
+  const token = tokens[idx]
+  return createVNode(token.tag, {
+    controlsList: 'nodownload',
+    controls: true,
+    onLeavepictureinpicture,
+    ...slf.renderAttrs(token) as any,
+  }, [])
+}
+
 defaultRules.hardbreak = function () {
   return createVNode('br')
 }
@@ -234,7 +270,7 @@ function renderAttrs (this: Renderer, token: Token) {
   const result: any = {}
 
   token.attrs.forEach(token => {
-    if (attrNameReg.test(token[0])) {
+    if (validateAttrName(token[0])) {
       result[token[0]] = token[1]
     }
   })
@@ -248,7 +284,7 @@ function render (this: Renderer, tokens: Token[], options: any, env: any) {
   const vNodeParents: VNode[] = []
 
   return tokens.map((token, i) => {
-    setSourceLine(token, env)
+    processToken(token, env)
     if (token.block) {
       token.attrSet(DOM_ATTR_NAME.TOKEN_IDX, i.toString())
     }

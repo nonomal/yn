@@ -2,24 +2,29 @@
   <div class="tree-node">
     <details
       v-if="itemNode.type === 'dir'"
-      class="name"
+      :class="{name: true, 'drag-over': dragOver}"
       :title="itemNode.path"
       :open="open"
       :data-count="itemNode.children?.length"
       :data-level="itemNode.level"
+      :data-should-open="shouldOpen"
       @toggle="(e: any) => open = e.target.open"
+      @dragenter="onDragEnter"
+      @dragover="onDragOver"
+      @dragleave="onDragLeave"
+      @dragexit="onDragExit"
+      @drop="onDrop"
       @keydown.enter.prevent>
       <summary
         :class="{folder: true, 'folder-selected': selected}"
         :style="`padding-left: ${itemNode.level}em`"
         @contextmenu.exact.prevent.stop="showContextMenu(itemNode)">
-        <div class="item">
-          <div class="item-label">
-            {{ itemNode.name === '/' ? currentRepoName : itemNode.name }} <span class="count">({{itemNode.children ? itemNode.children.length : 0}})</span>
+        <div class="item" @mouseenter.self="onMouseEnter" @mouseleave.self="onMouseLeave">
+          <div class="item-label" draggable="true" @dragstart="onDragStart">
+            {{ itemNode.name }} <span class="count">({{itemNode.children ? itemNode.children.length : 0}})</span>
           </div>
           <div class="item-action">
-            <svg-icon class="icon" name="folder-plus-solid" @click.exact.stop.prevent="createFolder()" :title="$t('tree.context-menu.create-dir')"></svg-icon>
-            <svg-icon class="icon" name="plus" @click.exact.stop.prevent="createFile()" :title="$t('tree.context-menu.create-doc')"></svg-icon>
+            <svg-icon v-for="btn in actions" :key="btn.id" class="icon" :name="btn.icon" @click.exact.stop.prevent="btn.onClick" :title="btn.title" />
           </div>
         </div>
       </summary>
@@ -34,23 +39,33 @@
       :style="`padding-left: ${itemNode.level}em`"
       :title="itemNode.path + '\n\n' + fileTitle"
       @click.exact.prevent="select(item)"
+      @dblclick.prevent="onTreeNodeDblClick(item)"
       @contextmenu.exact.prevent.stop="showContextMenu(itemNode)">
-      <div :class="{'item-label': true, marked, 'type-md': itemNode.name.endsWith('.md')}"> {{ itemNode.name }} </div>
+      <div
+        draggable="true"
+        @dragstart="onDragStart"
+        :class="{'item-label': true, marked, 'type-md': isMarkdownFile(itemNode)}">
+        {{ itemNode.name }}
+      </div>
     </div>
   </div>
 </template>
 
 <script lang="ts">
-import { computed, defineComponent, nextTick, PropType, ref, toRefs, watch } from 'vue'
-import { useStore } from 'vuex'
+import { computed, defineComponent, h, nextTick, PropType, ref, shallowRef, watch } from 'vue'
 import { useContextMenu } from '@fe/support/ui/context-menu'
-import extensions from '@fe/others/file-extensions'
 import { triggerHook } from '@fe/core/hook'
-import { getContextMenuItems } from '@fe/services/tree'
+import { getContextMenuItems, getNodeActionButtons, refreshTree } from '@fe/services/tree'
 import type { Components } from '@fe/types'
-import { createDir, createDoc, isMarked, openInOS, switchDoc } from '@fe/services/document'
-import SvgIcon from './SvgIcon.vue'
+import { deleteDoc, duplicateDoc, isMarkdownFile, isMarked, moveDoc, switchDoc } from '@fe/services/document'
 import { useI18n } from '@fe/services/i18n'
+import { dirname, extname, isBelongTo, join } from '@fe/utils/path'
+import { useToast } from '@fe/support/ui/toast'
+import { FLAG_READONLY } from '@fe/support/args'
+import { encodeMarkdownLink, escapeMd, fileToBase64URL } from '@fe/utils'
+import store from '@fe/support/store'
+import { upload } from '@fe/support/api'
+import SvgIcon from './SvgIcon.vue'
 
 export default defineComponent({
   name: 'tree-node',
@@ -64,36 +79,40 @@ export default defineComponent({
   setup (props) {
     const { t } = useI18n()
 
-    const store = useStore()
+    const toast = useToast()
 
     const refFile = ref<any>(null)
     const localMarked = ref<boolean | null>(null)
+    const dragOver = ref<boolean>(false)
+    const actions = shallowRef<Components.Tree.NodeActionBtn[]>([])
 
-    const itemNode = computed(() => ({ ...props.item, marked: props.item.type === 'file' && isMarked(props.item) }))
+    const itemNode = computed(() => ({ ...props.item, marked: isMarked(props.item) }))
     const open = ref(itemNode.value.path === '/')
 
     watch(() => props.item, () => {
       localMarked.value = null
     })
 
-    const { currentFile, currentRepo } = toRefs(store.state)
+    const currentFile = computed(() => store.state.currentFile)
 
-    async function createFile () {
-      await createDoc({ repo: props.item.repo }, props.item)
+    function onMouseEnter () {
+      actions.value = getNodeActionButtons(props.item)
     }
 
-    async function createFolder () {
-      await createDir({ repo: props.item.repo }, props.item)
+    function onMouseLeave () {
+      actions.value = []
+    }
+
+    function onTreeNodeDblClick (node: Components.Tree.Node) {
+      if (node.type === 'file') {
+        triggerHook('TREE_NODE_DBLCLICK', { node })
+      }
     }
 
     async function select (node: Components.Tree.Node) {
-      if (node.type !== 'dir') {
-        if (extensions.supported(node.name)) {
+      if (node.type === 'file') {
+        if (!(await triggerHook('TREE_NODE_SELECT', { node }, { breakable: true, ignoreError: true }))) {
           switchDoc(node)
-        } else {
-          if (!(await triggerHook('TREE_NODE_SELECT', { node }, { breakable: true }))) {
-            openInOS(node)
-          }
         }
       }
     }
@@ -102,7 +121,204 @@ export default defineComponent({
       useContextMenu().show([...getContextMenuItems(item, { localMarked })])
     }
 
-    const currentRepoName = computed(() => currentRepo.value?.name ?? '/')
+    async function handleFileDrop (item: Components.Tree.Node, copy: boolean) {
+      function showToast (type: 'moved' | 'copied', newPath: string) {
+        const undo = () => {
+          if (type === 'moved') {
+            moveDoc({ ...item, path: newPath }, item.path)
+          } else {
+            deleteDoc({ ...item, path: newPath }, true)
+          }
+
+          toast.hide()
+        }
+
+        toast.show('info', h('div', {}, [
+          h('span', {}, t(`tree.toast.${type}`, item.name, newPath)),
+          h('a', {
+            style: { color: '#fcfcfc', marginLeft: '10px' },
+            href: 'javascript:;',
+            onClick: undo
+          }, t('undo'))
+        ]), 4000)
+      }
+
+      let newPath: string | undefined = join(itemNode.value.path, item.name)
+
+      if (copy) {
+        // copy file only
+        if (item.type === 'file') {
+          if (item.path === newPath) {
+            // markdown file need input new name
+            if (isMarkdownFile(item)) {
+              newPath = undefined
+            } else {
+              // other file can be copied with same name
+              const dir = dirname(newPath)
+              const ext = extname(newPath)
+              const name = item.name.replace(ext, '')
+              newPath = join(dir, `${name}-copy${ext}`)
+            }
+          }
+
+          await duplicateDoc(item, newPath)
+
+          if (newPath) {
+            showToast('copied', newPath)
+          }
+        } else {
+          toast.show('warning', 'Cannot copy folder')
+        }
+      } else {
+        if (item.path === newPath) {
+          return
+        }
+
+        // move file or folder
+        if (isBelongTo(item.path, newPath)) {
+          toast.show('warning', 'Cannot move to self or its children')
+        } else {
+          await moveDoc(item, newPath)
+          showToast('moved', newPath)
+        }
+      }
+    }
+
+    async function handleFileUpload (files: FileList) {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        const base64 = await fileToBase64URL(file)
+        const path = join(itemNode.value.path, file.name)
+
+        await upload(props.item.repo, base64, path, 'rename').catch((e) => {
+          toast.show('warning', e.message)
+        })
+      }
+
+      refreshTree()
+    }
+
+    let dragOverTimer: number
+    let dragEnterElement: HTMLElement | null = null
+
+    const changeDragOver = (isOver: boolean) => {
+      dragOver.value = isOver
+      clearTimeout(dragOverTimer)
+
+      if (isOver) {
+        dragOverTimer = window.setTimeout(() => {
+          open.value = true
+        }, 800)
+      } else {
+        dragEnterElement = null
+      }
+    }
+
+    function onDragEnter (e: DragEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+      dragEnterElement = e.target as HTMLElement
+
+      function getTreeNodeSibling (): [any, any] {
+        const currentTreeNode = (e.target as HTMLElement).closest('.tree-node')
+        if (!currentTreeNode) {
+          return [null, null]
+        }
+
+        // get all tree nodes
+        const nodes = Array.from(document.querySelectorAll('aside.side .tree-node'))
+
+        const idx = nodes.indexOf(currentTreeNode)
+        if (idx === -1) {
+          return [null, null]
+        }
+
+        // get around 4 nodes
+        const aroundNodes = nodes.slice(Math.max(0, idx - 3), Math.min(nodes.length, idx + 4))
+
+        return [
+          aroundNodes[0].querySelector('.item-label'),
+          aroundNodes[aroundNodes.length - 1].querySelector('.item-label')
+        ]
+      }
+
+      setTimeout(() => {
+        const [first, last] = getTreeNodeSibling()
+
+        const container = document.querySelector('aside.side') as HTMLElement
+        const scrollTop = container.scrollTop || 0
+
+        first?.scrollIntoViewIfNeeded(false)
+
+        if (scrollTop === container.scrollTop) {
+          last?.scrollIntoViewIfNeeded(false)
+        }
+      }, 60)
+
+      changeDragOver(true)
+    }
+
+    function onDragLeave (e: DragEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+
+      if (dragEnterElement === e.target) {
+        changeDragOver(false)
+      }
+    }
+
+    function onDragExit (e: DragEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+
+      changeDragOver(false)
+    }
+
+    function onDragOver (e: DragEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+
+      if (e.altKey) {
+        e.dataTransfer!.dropEffect = 'copy'
+      } else {
+        e.dataTransfer!.dropEffect = 'move'
+      }
+    }
+
+    function onDragStart (e: DragEvent) {
+      e.stopPropagation()
+
+      const node = itemNode.value
+      if (isMarkdownFile(node)) {
+        e.dataTransfer!.setData('text/plain', `[${escapeMd(node.name)}](${encodeMarkdownLink(node.path)})`)
+      } else if (node.type === 'file' && /\.(png|jpe?g|gif|svg|webp)$/i.test(node.name)) {
+        e.dataTransfer!.setData('text/plain', `![Img](${encodeMarkdownLink(node.path)})`)
+      } else {
+        e.dataTransfer!.setData('text/plain', node.path)
+      }
+
+      e.dataTransfer!.setData('node-info', JSON.stringify(node))
+    }
+
+    function onDrop (e: DragEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+      changeDragOver(false)
+
+      const data = e.dataTransfer?.getData('node-info')
+      if (data) {
+        const item = JSON.parse(data) as Components.Tree.Node
+        handleFileDrop(item, e.altKey)
+      } else {
+        const isDragFile = !!e.dataTransfer?.items &&
+          e.dataTransfer.items.length > 0 &&
+          e.dataTransfer.items[0].kind === 'file'
+
+        if (isDragFile) {
+          handleFileUpload(e.dataTransfer.files)
+        }
+      }
+    }
 
     const selected = computed(() => {
       if (!currentFile.value) {
@@ -117,7 +333,12 @@ export default defineComponent({
     })
 
     const shouldOpen = computed(() => {
-      return itemNode.value.type === 'dir' && currentFile.value && currentFile.value.path.startsWith(itemNode.value.path + '/') && currentFile.value.repo === itemNode.value.repo
+      if (itemNode.value.type === 'dir' && currentFile.value) {
+        // open the folder when the file is in the folder
+        return itemNode.value.path === '/' || (currentFile.value.path.startsWith(itemNode.value.path + '/') && currentFile.value.repo === itemNode.value.repo)
+      }
+
+      return false
     })
 
     const marked = computed(() => localMarked.value ?? itemNode.value.marked)
@@ -148,13 +369,24 @@ export default defineComponent({
       itemNode,
       refFile,
       fileTitle,
-      currentRepoName,
       selected,
+      actions,
+      onTreeNodeDblClick,
       marked,
       showContextMenu,
       select,
-      createFile,
-      createFolder,
+      dragOver,
+      onDragEnter,
+      onDragOver,
+      onDragLeave,
+      onDragExit,
+      onDrop,
+      onDragStart,
+      onMouseEnter,
+      onMouseLeave,
+      shouldOpen,
+      isMarkdownFile,
+      FLAG_READONLY,
     }
   },
 })
@@ -165,7 +397,7 @@ export default defineComponent({
   font-size: 15px;
   line-height: 26px;
   cursor: default;
-  color: var(--g-color-5);
+  color: var(--g-color-2);
 }
 
 .tree-node * {
@@ -174,14 +406,30 @@ export default defineComponent({
 
 summary {
   outline: none;
+  height: 26px;
+  overflow: hidden;
+  contain: strict;
+  display: block;
 }
 
 summary.folder::-webkit-details-marker,
 summary.folder::marker {
-  flex: none;
-  width: 10px;
-  margin: 0;
-  margin-right: 5px;
+  content: '';
+  display: none;
+}
+
+summary.folder::before {
+  display: inline-block;
+  width: 11px;
+  height: 27px;
+  content: url(data:image/svg+xml;base64,PHN2ZyBhcmlhLWhpZGRlbj0idHJ1ZSIgZm9jdXNhYmxlPSJmYWxzZSIgZGF0YS1wcmVmaXg9ImZhciIgZGF0YS1pY29uPSJjaGV2cm9uLWRvd24iIHJvbGU9ImltZyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2aWV3Qm94PSIwIDAgNDQ4IDUxMiIgPjxwYXRoIGZpbGw9IiM3YzdmODIiIGQ9Ik00NDEuOSAxNjcuM2wtMTkuOC0xOS44Yy00LjctNC43LTEyLjMtNC43LTE3IDBMMjI0IDMyOC4yIDQyLjkgMTQ3LjVjLTQuNy00LjctMTIuMy00LjctMTcgMEw2LjEgMTY3LjNjLTQuNyA0LjctNC43IDEyLjMgMCAxN2wyMDkuNCAyMDkuNGM0LjcgNC43IDEyLjMgNC43IDE3IDBsMjA5LjQtMjA5LjRjNC43LTQuNyA0LjctMTIuMyAwLTE3eiIgY2xhc3M9IiI+PC9wYXRoPjwvc3ZnPg==);
+  margin-right: 3px;
+  transform: rotate(-90deg);
+  transition: transform 0.1s;
+}
+
+details.name[open] > summary.folder::before {
+  transform: rotate(0);
 }
 
 .folder {
@@ -214,6 +462,8 @@ summary > .item {
   text-overflow: ellipsis;
   word-break: break-all;
   height: 26px;
+  font-variant-numeric: tabular-nums;
+  flex-grow: 1;
 }
 
 .item-action {
@@ -231,12 +481,12 @@ summary > .item {
   height: 20px;
   width: 20px;
   border-radius: 50%;
-  color: var(--g-color-45);
+  color: var(--g-color-30);
 }
 
 .item-action .icon:hover {
   background: var(--g-color-70);
-  color: var(--g-color-25);
+  color: var(--g-color-20);
 }
 
 .item:hover .item-action {
@@ -259,6 +509,17 @@ summary > .item {
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
+}
+
+.name.drag-over {
+  opacity: 0.5;
+  outline: 2px #4790fe dashed;
+  outline-offset: -4px;
+  transition-delay: 0s;
+
+  summary {
+    contain: none;
+  }
 }
 
 .file-name {
@@ -294,7 +555,18 @@ summary > .item {
 }
 
 .marked {
-  color: #569bd5;
+  position: relative;
+}
+
+.marked::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  background: #569bd5;
+  border-radius: 50%;
+  position: absolute;
+  left: -5px;
+  top: 34%;
 }
 
 .name {

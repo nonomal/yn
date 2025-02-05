@@ -3,8 +3,8 @@
     <div class="history-wrapper" v-if="currentDoc" @click.stop>
       <div class="history">
         <div class="versions-wrapper" v-if="versions && versions.length">
-          <div v-if="listType === 'all'" class="clear" @click="clearVersions">{{$t('doc-history.clear')}}</div>
-          <GroupTabs class="tabs" :tabs="getListTypes()" v-model="listType" />
+          <div v-if="listType === 'all'" class="clear" @click="clearVersions">{{$t('doc-history.clear')}}({{sizeText}})</div>
+          <group-tabs class="x-tabs" size="small" :tabs="getListTypes()" v-model="listType" />
           <div class="versions" v-if="xVersions && xVersions.length">
             <div
               v-for="(version, i) in xVersions"
@@ -31,7 +31,7 @@
           </div>
         </div>
         <div class="content" v-if="content">
-          <GroupTabs class="tabs" :tabs="getDisplayTypes()" v-model="displayType" />
+          <group-tabs class="x-tabs" size="small" :tabs="getDisplayTypes()" v-model="displayType" />
           <div class="diff-tips" v-if="displayType === 'diff'">
             <div>{{$t('doc-history.history')}}</div>
             <div>{{$t('doc-history.current')}}</div>
@@ -55,11 +55,11 @@
 <script lang="ts" setup>
 import dayjs from 'dayjs'
 import type * as Monaco from 'monaco-editor'
-import { useStore } from 'vuex'
-import { ref, onMounted, onUnmounted, watch, toRef, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, toRef, computed, nextTick } from 'vue'
+import { DOC_HISTORY_MAX_CONTENT_LENGTH } from '@share/misc'
 import { removeAction, registerAction } from '@fe/core/action'
 import { registerHook, removeHook } from '@fe/core/hook'
-import { Alt } from '@fe/core/command'
+import { Alt } from '@fe/core/keybinding'
 import { commentHistoryVersion, deleteHistoryVersion, fetchHistoryContent, fetchHistoryList } from '@fe/support/api'
 import { getDefaultOptions, getMonaco, setValue, whenEditorReady } from '@fe/services/editor'
 import { isEncrypted, isSameFile } from '@fe/services/document'
@@ -72,6 +72,7 @@ import { getLogger } from '@fe/utils'
 import type { Doc } from '@fe/types'
 import { decrypt } from '@fe/utils/crypto'
 import { getPurchased, showPremium } from '@fe/others/premium'
+import store from '@fe/support/store'
 import SvgIcon from '@fe/components/SvgIcon.vue'
 import XMask from './Mask.vue'
 import GroupTabs from './GroupTabs.vue'
@@ -83,8 +84,6 @@ const MARKED = '--marked--'
 const logger = getLogger('doc-history-component')
 
 const { t } = useI18n()
-
-const store = useStore()
 
 const getDisplayTypes = () => [
   { label: t('doc-history.content'), value: 'content' },
@@ -99,6 +98,7 @@ const getListTypes = () => [
 const currentDoc = ref<Doc | null>(null)
 const currentVersion = ref<Version>()
 const versions = ref<Version[] | null>([])
+const size = ref(0)
 const content = ref('')
 const displayType = ref<'content' | 'diff'>('content')
 const listType = ref<'all' | 'marked'>('all')
@@ -115,23 +115,47 @@ const xVersions = computed(() => {
   return versions.value
 })
 
+const sizeText = computed(() => {
+  const val = Math.round(size.value / 1024)
+  return val > 1024 ? `${Math.round(val / 1024)}M` : `${val}K`
+})
+
 function show (doc?: Doc) {
   doc ??= currentFile.value!
   currentDoc.value = doc
+
+  if (currentContent.value && currentContent.value.length > DOC_HISTORY_MAX_CONTENT_LENGTH) {
+    nextTick(() => {
+      useModal().alert({
+        title: t('doc-history.content-too-long-alert.title'),
+        content: t('doc-history.content-too-long-alert.content', String(DOC_HISTORY_MAX_CONTENT_LENGTH), String(currentContent.value.length)),
+      })
+    })
+  }
 }
 
 function hide () {
   currentDoc.value = null
   versions.value = null
+  size.value = 0
 }
 
 async function fetchVersions () {
   try {
     versions.value = null
-    versions.value = (currentDoc.value ? await fetchHistoryList(currentDoc.value) : []).map(({ name: value, comment }) => {
+    size.value = 0
+
+    let list: any[] = []
+    if (currentDoc.value) {
+      const data = await fetchHistoryList(currentDoc.value!)
+      list = data.list
+      size.value = data.size
+    }
+
+    versions.value = list.map(({ name: value, comment }) => {
       const arr = value.split('.')
       const name = arr[0]
-      const encrypted = isEncrypted({ path: value })
+      const encrypted = isEncrypted({ type: 'file', path: value })
       const tmp = name.split(' ')
       tmp[1] = tmp[1].replaceAll('-', ':')
       const time = tmp.join(' ')
@@ -233,6 +257,14 @@ function layoutEditor () {
 function cleanEditor () {
   logger.debug('cleanEditor')
   if (editor) {
+    const models = editor.getModel()
+
+    if (models) {
+      'dispose' in models && models.dispose()
+      'original' in models && models.original.dispose()
+      'modified' in models && models.modified.dispose()
+    }
+
     editor.dispose()
     editor = null
   }
@@ -285,10 +317,18 @@ async function updateEditor () {
       ...getDefaultOptions(),
       readOnly: true,
       scrollbar: undefined,
+      theme: undefined,
     }
 
     if (isDiffEditor) {
-      editor = monaco.editor.createDiffEditor(refEditor.value, options)
+      editor = monaco.editor.createDiffEditor(refEditor.value, {
+        ...options,
+        diffAlgorithm: 'legacy',
+        ignoreTrimWhitespace: false,
+        hideUnchangedRegions: {
+          enabled: true
+        },
+      })
     } else {
       editor = monaco.editor.create(refEditor.value, options)
     }
@@ -335,7 +375,13 @@ watch(currentVersion, async val => {
 watch([content, displayType, refEditor], updateEditor)
 
 onMounted(() => {
-  registerAction({ name: 'doc.show-history', handler: show, keys: [Alt, 'h'] })
+  registerAction({
+    name: 'doc.show-history',
+    handler: show,
+    keys: [Alt, 'h'],
+    forUser: true,
+    description: t('command-desc.doc_show-history'),
+  })
   registerAction({ name: 'doc.hide-history', handler: hide })
 
   registerHook('GLOBAL_RESIZE', layoutEditor)
@@ -493,16 +539,8 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-.tabs {
-  display: inline-flex;
+.versions-wrapper .x-tabs {
   margin-bottom: 8px;
-  z-index: 1;
-  flex: none;
-
-  ::v-deep(.tab) {
-    line-height: 1.5;
-    font-size: 14px;
-  }
 }
 
 .content {
@@ -512,6 +550,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
+  overflow: hidden;
 
   &>.diff-tips {
     width: 100%;

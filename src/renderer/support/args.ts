@@ -1,8 +1,15 @@
+import type { ResourceTagName } from '@fe/types'
+
 /**
  * Get all params from url.
  * @returns params
  */
 export function $args () {
+  if (!globalThis.window) {
+    // in web worker
+    return new URLSearchParams(self.location.search)
+  }
+
   const win = window.opener || window.parent || window
   return new URLSearchParams(win.location.search)
 }
@@ -21,16 +28,35 @@ export const FLAG_DEMO = import.meta.env.MODE === 'demo'
 export const FLAG_READONLY = $args().get('readonly') === 'true' || MODE !== 'normal'
 export const FLAG_DEBUG = import.meta.env.MODE === 'development' || $args().get('debug') === 'true'
 
+export const HELP_REPO_NAME = '__help__'
+
+export const MONACO_EDITOR_NLS = { de: 'Deutsch', es: 'Español', fr: 'Français', it: 'Italiano', ja: '日本語', ko: '한국어', ru: 'Русский', 'zh-cn': '简体中文', 'zh-tw': '繁體中文' }
+
+export const RESOURCE_TAG_NAMES: ResourceTagName[] = ['audio', 'img', 'source', 'video', 'track', 'iframe', 'embed']
+
+export const CSS_VAR_NAME = {
+  PREVIEWER_HEIGHT: '--previewer-height'
+}
+
 export const DOM_ATTR_NAME = {
   SOURCE_LINE_START: 'data-source-line',
   SOURCE_LINE_END: 'data-source-line-end',
   ORIGIN_SRC: 'origin-src',
-  ORIGIN_HREF: 'origin-href',
+  TARGET_REPO: 'target-repo',
+  TARGET_PATH: 'target-path',
   LOCAL_IMAGE: 'local-image',
+  ONLY_CHILD: 'auto-center',
   TOKEN_IDX: 'data-token-idx',
+  DISPLAY_NONE: 'display-none',
+  WIKI_LINK: 'wiki-link',
+  WIKI_RESOURCE: 'wiki-resource',
+  IS_ANCHOR: 'is-anchor',
+  SKIP_EXPORT: 'skip-export',
 }
 
 export const DOM_CLASS_NAME = {
+  PREVIEW_HIGHLIGHT: 'preview-highlight',
+  PREVIEW_MARKDOWN_BODY: 'markdown-body',
   MARK_OPEN: 'open',
   SKIP_EXPORT: 'skip-export',
   SKIP_PRINT: 'skip-print',

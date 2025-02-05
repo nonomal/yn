@@ -1,18 +1,18 @@
 <template>
-  <XMask :show="show" @close="cancel" @key-enter="inputType !== 'textarea' && ok()" :mask-closeable="false" esc-closeable>
-    <div class="wrapper" :style="{width: modalWidth}" @click.stop>
+  <XMask :show="show" @close="cancel" :mask-closeable="false" esc-closeable>
+    <div class="wrapper" :style="{width: modalWidth}" @click.stop @keypress.enter.self.stop.prevent="ok" tabindex="1" v-auto-focus>
       <h4>{{title}}</h4>
       <component v-if="component" :is="component" />
       <p class="content" v-if="content">{{content}}</p>
       <template v-if="type === 'input'">
-        <textarea class="textarea" v-if="inputType === 'textarea'" ref="refInput" rows="5" :placeholder="inputHint" :readonly="inputReadonly" v-model="inputValue"></textarea>
-        <input class="input" v-else ref="refInput" :type="inputType" :placeholder="inputHint" :readonly="inputReadonly" v-model="inputValue">
+        <textarea class="textarea" v-if="inputType === 'textarea'" ref="refInput" rows="5" :placeholder="inputHint" :readonly="inputReadonly" v-model="inputValue" tabindex="2" :maxlength="inputMaxLength > 0 ? inputMaxLength : undefined" />
+        <input class="input" v-else ref="refInput" :type="inputType" :placeholder="inputHint" :readonly="inputReadonly" v-model="inputValue" @keypress.enter.stop.prevent="ok" tabindex="2" :maxlength="inputMaxLength > 0 ? inputMaxLength : undefined" />
       </template>
       <div class="action">
         <component v-if="action" :is="action" />
         <template v-else>
-          <button v-if="type !== 'alert'" class="btn tr" @click="cancel">{{ cancelText }}</button>
-          <button class="btn primary tr" @click="ok">{{ okText }}</button>
+          <button v-if="type !== 'alert'" class="btn tr" tabindex="4" @click="cancel">{{ cancelText }}</button>
+          <button class="btn primary tr" tabindex="3" @click="ok">{{ okText }}</button>
         </template>
       </div>
     </div>
@@ -28,7 +28,7 @@ import XMask from './Mask.vue'
 type ModalType = '' | 'confirm' | 'input' | 'alert'
 
 export default defineComponent({
-  name: 'modal-input',
+  name: 'modal-ui',
   components: { XMask },
   setup () {
     const { t } = useI18n()
@@ -47,6 +47,7 @@ export default defineComponent({
     const inputValue = ref('')
     const inputHint = ref('')
     const inputReadonly = ref(false)
+    const inputMaxLength = ref(0)
     const modalWidth = ref<string | undefined>(undefined)
 
     let resolveFun: Function | null = null
@@ -81,7 +82,7 @@ export default defineComponent({
       component.value = params.component
       action.value = params.action
       show.value = true
-      modalWidth.value = undefined
+      modalWidth.value = params.modalWidth
 
       return new Promise(resolve => {
         resolveFun = resolve
@@ -97,7 +98,7 @@ export default defineComponent({
       component.value = params.component
       action.value = params.action
       show.value = true
-      modalWidth.value = undefined
+      modalWidth.value = params.modalWidth
 
       return new Promise(resolve => {
         resolveFun = resolve
@@ -113,9 +114,10 @@ export default defineComponent({
       inputType.value = params.type || 'text'
       inputValue.value = params.value || ''
       inputHint.value = params.hint || ''
+      inputMaxLength.value = params.maxlength || 0
       inputReadonly.value = params.readonly || false
       modalWidth.value = params.modalWidth
-      component.value = undefined
+      component.value = params.component
       action.value = undefined
 
       show.value = true
@@ -155,6 +157,7 @@ export default defineComponent({
       inputValue,
       inputHint,
       inputReadonly,
+      inputMaxLength,
       modalWidth,
     }
   },
@@ -171,6 +174,7 @@ export default defineComponent({
   box-shadow: rgba(0, 0, 0, 0.3) 2px 2px 10px;
   border-radius: var(--g-border-radius);
   overflow-wrap: break-word;
+  outline: none;
 }
 
 textarea {

@@ -2,12 +2,13 @@
   <XMask :mask-closeable="false" :style="{paddingTop: '7vh'}" :show="!!showManager" @close="hide">
     <div class="wrapper">
       <div class="body">
-        <div class="side">
-          <group-tabs class="tabs" :tabs="listTypes" v-model="listType" />
+        <div class="side" ref="refSide">
+          <group-tabs class="x-tabs" size="small" :tabs="listTypes" v-model="listType" />
           <div v-if="extensions.length > 0" class="list">
             <div
               v-for="item in extensions"
               :key="item.id"
+              :data-id="item.id"
               :class="{item: true, selected: item.id === currentExtension?.id}"
               @click="choose(item.id)">
               <div class="left">
@@ -25,7 +26,9 @@
                 </div>
                 <div class="description">{{ item.description }}</div>
                 <div class="bottom">
-                  <div v-if="item.origin === 'official'" class="author"><i>Yank Note</i></div>
+                  <div v-if="item.origin === 'official'" class="author">
+                    <i><svg-icon name="codicon-verified-filled" height="16px" style="margin-top: -2px;" />Yank Note</i>
+                  </div>
                   <div v-else class="author" >{{ item.author.name }}</div>
                   <div class="status-list">
                     <div v-if="!item.compatible.value" class="status">{{ $t('extension.incompatible') }}</div>
@@ -44,7 +47,8 @@
             </div>
           </div>
           <div v-else class="list">
-            <div class="placeholder">{{ $t(registryExtensions ? 'extension.no-extension' : 'loading') }}</div>
+            <div v-if="!registryExtensions" class="placeholder">{{ $t('loading') }}</div>
+            <div v-else-if="registryExtensions.length === 0 && installedExtensions?.length === 0" class="placeholder">{{ $t('extension.no-extension') }}</div>
           </div>
         </div>
         <div class="detail">
@@ -70,7 +74,10 @@
                   </div>
                   <div class="tag">
                     <span>{{ $t('extension.author') }}</span>
-                    <span v-if="currentExtension.origin === 'official'"><i>Yank Note</i></span>
+                    <span v-if="currentExtension.origin === 'official'">
+                      <svg-icon name="codicon-verified-filled" height="16px" style="margin-top: -4px;margin-bottom: -2px;" />
+                      <i>Yank Note</i>
+                    </span>
                     <span v-else>{{ currentExtension.author.name }}</span>
                   </div>
                   <div v-if="currentExtension.latestVersion" class="tag">
@@ -101,7 +108,7 @@
                     style="cursor: pointer;"
                     @click="openUrl(`https://www.npmjs.com/package/${currentExtension?.id}`)"
                   >
-                    <img alt="npm" :src="`https://img.shields.io/npm/dy/${currentExtension.id}?color=%234180bd&label=Download&style=flat-square`">
+                    <img alt="npm" :key="`download-${currentExtension.id}`" :src="`https://img.shields.io/npm/dy/${currentExtension.id}?color=%234180bd&label=Download&style=flat-square`">
                   </div>
                   <div
                     v-if="currentExtension.requirements.premium"
@@ -123,7 +130,10 @@
                   </div>
                 </div>
                 <div class="description">{{ currentExtension.description }}</div>
-                <div v-if="installing" class="actions"><i>{{ $t('extension.installing') }} <b>{{installing}}</b></i></div>
+                <div v-if="installing" class="actions">
+                  <i>{{ $t('extension.installing') }} <b>{{installing}}</b></i>
+                  <button class="small" @click="abortInstallation">{{$t('cancel')}}</button>
+                </div>
                 <div v-else-if="uninstalling" class="actions"><i>{{ $t('extension.uninstalling') }}</i></div>
                 <div v-else class="actions">
                   <template v-if="currentExtension.dirty">
@@ -147,7 +157,7 @@
               </div>
             </div>
             <div class="content-wrapper">
-              <group-tabs class="tabs" :tabs="contentTypes" v-model="contentType" />
+              <group-tabs class="x-tabs" size="small" :tabs="contentTypes" v-model="contentType" />
               <template v-if="useNpmjsReadmePage">
                 <div v-show="iframeLoaded" class="content">
                   <iframe
@@ -160,16 +170,15 @@
                 <div v-if="!iframeLoaded" class="placeholder">{{ $t('loading') }}</div>
               </template>
               <template v-else>
-                <div v-show="iframeLoaded" class="content">
+                <div v-if="contentMap[contentType][currentExtension.id]" class="content">
                   <iframe
-                    v-if="contentMap[contentType][currentExtension.id]"
                     @load="iframeOnload"
                     sandbox="allow-scripts allow-popups allow-same-origin"
                     referrerpolicy="no-referrer"
                     :srcdoc="contentMap[contentType][currentExtension.id] || ''"
                   />
                 </div>
-                <div v-if="!iframeLoaded" class="placeholder">{{ $t('loading') }}</div>
+                <div v-else class="placeholder">{{ $t('loading') }}</div>
               </template>
             </div>
           </template>
@@ -185,6 +194,10 @@
                   :selected="hostname === currentRegistry"
                 >{{ hostname }}</option>
               </select>
+              <label>
+                <input type="checkbox" v-model="autoUpgrade" />
+                <b>{{$t('extension.auto-upgrade')}}</b>
+              </label>
             </div>
             <div class="right">
               <template v-if="reloadRequired">
@@ -201,22 +214,26 @@
 </template>
 
 <script lang="ts" setup>
+import { debounce } from 'lodash-es'
 import Markdown from 'markdown-it'
 import semver from 'semver'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getCurrentLanguage, useI18n } from '@fe/services/i18n'
-import { getLogger } from '@fe/utils'
+import { getLogger, sleep } from '@fe/utils'
 import * as api from '@fe/support/api'
 import { registerAction, removeAction } from '@fe/core/action'
-import XMask from '@fe/components/Mask.vue'
-import GroupTabs from '@fe/components/GroupTabs.vue'
 import * as extensionManager from '@fe/others/extension'
 import type { Extension, ExtensionCompatible } from '@fe/types'
+import { reloadMainWindow } from '@fe/services/base'
 import * as setting from '@fe/services/setting'
 import { useModal } from '@fe/support/ui/modal'
 import { useToast } from '@fe/support/ui/toast'
 import { getPurchased, showPremium } from '@fe/others/premium'
 import { FLAG_DISABLE_XTERM, FLAG_MAS, URL_MAS_LIMITATION } from '@fe/support/args'
+
+import XMask from '@fe/components/Mask.vue'
+import GroupTabs from '@fe/components/GroupTabs.vue'
+import SvgIcon from '@fe/components/SvgIcon.vue'
 
 const markdownIt = Markdown({ linkify: true, breaks: true, html: false })
 
@@ -226,6 +243,7 @@ const { $t, t } = useI18n()
 
 const registries = extensionManager.registries
 
+const refSide = ref<HTMLElement>()
 const showManager = ref(false)
 const currentId = ref('')
 const iframeLoaded = ref(false)
@@ -236,6 +254,7 @@ const registryExtensions = ref<Extension[] | null>(null)
 const installedExtensions = ref<Extension[] | null>(null)
 const listType = ref<'all' | 'installed'>('all')
 const contentType = ref<'readme' | 'changelog'>('readme')
+const autoUpgrade = ref<boolean>()
 const currentRegistry = ref(setting.getSetting(
   'extension.registry',
   getCurrentLanguage() === 'zh-CN' ? 'registry.npmmirror.com' : 'registry.npmjs.org'
@@ -255,38 +274,40 @@ const contentTypes = computed(() => [
   { label: 'CHANGELOG', value: 'changelog' },
 ])
 
-const extensions = computed(() => {
-  let list: (Extension & {
-    dirty?: boolean,
-    upgradable?: boolean,
-    latestVersion?: string,
-    newVersionCompatible?: ExtensionCompatible,
-    activationTime?: number,
-  })[] = []
+type ListExtensionItem = Extension & {
+  dirty?: boolean,
+  upgradable?: boolean,
+  latestVersion?: string,
+  newVersionCompatible?: ExtensionCompatible,
+  activationTime?: number,
+}
 
-  if (registryExtensions.value) {
+function buildListExtensionItem (extension: Extension, installedExtension: Extension) {
+  const upgradable = installedExtension.version !== extension.version && semver.gt(extension.version, installedExtension.version)
+  return {
+    ...extension,
+    installed: true,
+    icon: upgradable ? extension.icon : installedExtension.icon,
+    readmeUrl: upgradable ? extension.readmeUrl : installedExtension.readmeUrl,
+    changelogUrl: upgradable ? extension.changelogUrl : installedExtension.changelogUrl,
+    requirements: upgradable ? extension.requirements : installedExtension.requirements,
+    enabled: installedExtension.enabled,
+    version: installedExtension.version,
+    compatible: installedExtension.compatible,
+    isDev: installedExtension.isDev,
+    newVersionCompatible: extension.compatible,
+    latestVersion: extension.version,
+    upgradable,
+  }
+}
+
+const extensions = computed(() => {
+  let list: ListExtensionItem[] = []
+
+  if (registryExtensions.value && installedExtensions.value) {
     list = registryExtensions.value.map(item => {
       const installedInfo = installedExtensions.value?.find(installed => installed.id === item.id)
-      if (installedInfo) {
-        const upgradable = installedInfo.version !== item.version && semver.gt(item.version, installedInfo.version)
-        return {
-          ...item,
-          installed: true,
-          icon: upgradable ? item.icon : installedInfo.icon,
-          readmeUrl: upgradable ? item.readmeUrl : installedInfo.readmeUrl,
-          changelogUrl: upgradable ? item.changelogUrl : installedInfo.changelogUrl,
-          requirements: upgradable ? item.requirements : installedInfo.requirements,
-          enabled: installedInfo.enabled,
-          version: installedInfo.version,
-          compatible: installedInfo.compatible,
-          isDev: installedInfo.isDev,
-          newVersionCompatible: item.compatible,
-          latestVersion: item.version,
-          upgradable,
-        }
-      }
-
-      return item
+      return installedInfo ? buildListExtensionItem(item, installedInfo) : item
     })
   }
 
@@ -359,6 +380,7 @@ async function fetchExtensions () {
     registryExtensions.value = await extensionManager.getRegistryExtensions(currentRegistry.value)
   } catch (error) {
     logger.error('fetchExtensions', error)
+    useToast().show('warning', t('extension.fetch-registry-failed'))
     registryExtensions.value = []
     throw error
   } finally {
@@ -373,7 +395,7 @@ async function fetchContent (type: 'readme' | 'changelog', extension: Extension)
 
   try {
     const url = type === 'readme' ? extension.readmeUrl : extension.changelogUrl
-    const xfetch = /https?:\/\//.test(url) ? api.proxyRequest : window.fetch
+    const xfetch = /https?:\/\//.test(url) ? api.proxyFetch : window.fetch
     const markdown = await xfetch(url).then(r => {
       if (r.ok === false) {
         logger.warn('fetchContent', r.statusText)
@@ -384,9 +406,10 @@ async function fetchContent (type: 'readme' | 'changelog', extension: Extension)
     })
 
     contentMap.value[type][extension.id] = `
+      <base target="_blank" />
       <link rel="stylesheet" href="${location.origin}/github.css">
       <div style="padding: 12px" class="markdown-body">
-        ${markdownIt.render(markdown)}
+        ${markdownIt.render(markdown.replaceAll(/<small>([^<]+)<\/small>/g, '**$1**'))}
       </div>
     `
   } catch (error: any) {
@@ -431,7 +454,7 @@ async function checkRequirements (extension: Extension) {
   }
 }
 
-async function install (extension?: Extension) {
+async function install (extension?: Extension, auto?: boolean) {
   if (!extension) {
     return
   }
@@ -441,16 +464,27 @@ async function install (extension?: Extension) {
   try {
     installing.value = extension.id
     await extensionManager.install(extension, currentRegistry.value)
-    await refreshInstalledExtensions()
+    !auto && await refreshInstalledExtensions()
   } catch (error: any) {
     logger.error('install', error)
-    useToast().show('warning', error.message)
+    !auto && useToast().show('warning', error.message)
     throw error
   } finally {
     installing.value = ''
   }
 
-  useToast().show('info', $t.value('extension.toast-loaded'))
+  !auto && useToast().show('info', $t.value('extension.toast-loaded'))
+}
+
+async function abortInstallation () {
+  try {
+    await extensionManager.abortInstallation()
+    installing.value = ''
+  } catch (error: any) {
+    logger.error('abort', error)
+    useToast().show('warning', error.message)
+    throw error
+  }
 }
 
 async function uninstall (extension?: Extension) {
@@ -482,12 +516,12 @@ async function uninstall (extension?: Extension) {
   }
 }
 
-async function upgrade (extension?: Extension) {
-  install(extension)
+async function upgrade (extension?: Extension, auto?: boolean) {
+  await install(extension, auto)
 }
 
 function reload () {
-  window.location.reload()
+  reloadMainWindow()
 }
 
 async function enable (extension?: Extension) {
@@ -540,6 +574,61 @@ function openUrl (url?: string) {
   }
 }
 
+let autoUpgrading = false
+async function triggerAutoUpgrade () {
+  logger.debug('triggerAutoUpgrade', autoUpgrade.value)
+
+  if (!autoUpgrade.value) {
+    return
+  }
+
+  if (autoUpgrading) {
+    logger.warn('triggerAutoUpgrade', 'upgrading')
+    return
+  }
+
+  autoUpgrading = true
+
+  try {
+    logger.debug('triggerAutoUpgrade', 'start')
+
+    const registryExtensions = await extensionManager.getRegistryExtensions(currentRegistry.value)
+    const installed = await extensionManager.getInstalledExtensions()
+
+    let count = 0
+    let firstUpgradeId = ''
+    for (const extension of registryExtensions) {
+      const installedExt = installed.find(e => e.id === extension.id)
+      if (installedExt) {
+        const item = buildListExtensionItem(extension, installedExt)
+        if (item.upgradable && item.newVersionCompatible.value && !item.isDev) {
+          logger.debug('triggerAutoUpgrade', item.id, item.latestVersion)
+          try {
+            await upgrade(item, true)
+            firstUpgradeId = firstUpgradeId || item.id
+            count++
+          } catch (error: any) {
+            logger.error('triggerAutoUpgrade', item.id, error)
+          }
+        }
+      }
+    }
+
+    if (count) {
+      if (showManager.value) {
+        await refreshInstalledExtensions()
+      }
+
+      useToast().show('info', $t.value('extension.extensions-auto-upgraded', String(count)))
+      await sleep(2000)
+      show(firstUpgradeId)
+    }
+  } finally {
+    logger.debug('triggerAutoUpgrade', 'done')
+    autoUpgrading = false
+  }
+}
+
 watch(extensions, () => {
   if (!currentId.value && extensions.value.length > 0) {
     choose(extensions.value[0].id)
@@ -564,14 +653,31 @@ watch(currentRegistry, (val) => {
 })
 
 watch(currentExtension, (val) => {
+  if (val) {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    refSide.value?.querySelector(`[data-id="${val.id}"]`)?.scrollIntoViewIfNeeded()
+  }
+
   if (val && installedExtensions.value) {
     fetchContent('readme', val)
     fetchContent('changelog', val)
   }
 })
 
+watch(autoUpgrade, debounce((val) => {
+  triggerAutoUpgrade()
+  setting.setSetting('extension.auto-upgrade', !!val)
+}, 5000))
+
 onMounted(() => {
-  registerAction({ name: 'extension.show-manager', handler: show })
+  autoUpgrade.value = setting.getSetting('extension.auto-upgrade', true)
+  registerAction({
+    name: 'extension.show-manager',
+    description: t('command-desc.extension_show-manager'),
+    handler: show,
+    forUser: true,
+  })
 })
 
 onUnmounted(() => {
@@ -599,8 +705,7 @@ onUnmounted(() => {
 
 .body {
   display: flex;
-  height: calc(100vh - 7vh - 50px);
-  max-height: 900px;
+  height: calc(100vh - 7vh - 100px);
 }
 
 .side {
@@ -618,12 +723,12 @@ onUnmounted(() => {
   width: 100%;
   box-sizing: border-box;
   font-size: 16px;
-  background-color: rgba(var(--g-color-0-rgb), 0.06);
+  padding-right: 5px;
 
   .item {
     cursor: pointer;
     position: relative;
-    border-bottom: 1px var(--g-color-70) solid;
+    border-bottom: 1px var(--g-color-82) solid;
     color: var(--g-color-20);
     display: flex;
     height: 77px;
@@ -660,6 +765,10 @@ onUnmounted(() => {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+
+        i {
+          color: #4c8cc1;
+        }
       }
 
       .version {
@@ -697,16 +806,8 @@ onUnmounted(() => {
   }
 }
 
-.tabs {
-  display: inline-flex;
+.wrapper .body .x-tabs {
   margin-bottom: 8px;
-  z-index: 1;
-  flex: none;
-
-  ::v-deep(.tab) {
-    line-height: 1.5;
-    font-size: 14px;
-  }
 }
 
 .icon-extension {
@@ -748,7 +849,7 @@ onUnmounted(() => {
       padding: 12px;
 
       .title {
-        align-items: flex-end;
+        align-items: center;
         justify-content: start;
         overflow: hidden;
         margin-top: -6px;
@@ -810,6 +911,7 @@ onUnmounted(() => {
 
         i {
           font-size: 14px;
+          margin-right: 6px;
         }
       }
     }
@@ -876,10 +978,21 @@ iframe {
   .left {
     display: flex;
     align-items: center;
+    user-select: none;
 
     select {
       margin-left: 12px;
       padding: 4px;
+    }
+
+    label {
+      margin-left: 12px;
+      display: flex;
+      align-items: center;
+
+      input {
+        margin-right: 4px;
+      }
     }
   }
 

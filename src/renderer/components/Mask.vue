@@ -1,9 +1,12 @@
 <template>
   <teleport to="body">
     <transition name="fade">
-      <div v-if="show" class="mask-wrapper" :style="wrapperStyle">
-        <div class="mask" @click="() => maskCloseable && $emit('close')" />
-        <div class="content">
+      <div v-if="show" :class="{'mask-wrapper': true, transparent}" :style="style" v-auto-z-index="{ layer, onEsc }">
+        <div class="mask"
+          @click.self="() => maskCloseable && $emit('close')"
+        />
+        <div class="content"
+          @click.self="() => maskCloseable && $emit('close')">
           <slot></slot>
         </div>
       </div>
@@ -12,9 +15,7 @@
 </template>
 
 <script lang="ts">
-import { computed, defineComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-
-let zIndex = 199998
+import { defineComponent } from 'vue'
 
 export default defineComponent({
   name: 'x-mask',
@@ -28,47 +29,28 @@ export default defineComponent({
       type: Boolean,
       default: true,
     },
+    transparent: {
+      type: Boolean,
+      default: false,
+    },
     style: {
       type: [Object, String],
       default: () => ({}),
-    }
+    },
+    layer: {
+      type: String as () => 'popup' | 'context-menu' | 'max' | 'modal',
+      default: 'modal'
+    },
   },
-  emits: ['close', 'key-enter'],
+  emits: ['close'],
   setup (props, { emit }) {
-    const zIndexRef = ref(zIndex++)
-
-    function keypressHandler (e: KeyboardEvent) {
-      if (e.key === 'Enter' && props.show) {
-        emit('key-enter')
-      }
-    }
-
-    function keydownHandler (e: KeyboardEvent) {
-      if (e.key === 'Escape' && props.show) {
+    function onEsc () {
+      if (props.show) {
         props.escCloseable && emit('close')
       }
     }
 
-    watch(() => props.show, (val) => {
-      if (val) {
-        zIndex++
-        zIndexRef.value = zIndex
-      }
-    })
-
-    const wrapperStyle = computed(() => (typeof props.style === 'string' ? props.style : { zIndex: zIndexRef.value, ...props.style }))
-
-    onMounted(() => {
-      window.addEventListener('keypress', keypressHandler, true)
-      window.addEventListener('keydown', keydownHandler, true)
-    })
-
-    onBeforeUnmount(() => {
-      window.removeEventListener('keypress', keypressHandler, true)
-      window.removeEventListener('keydown', keydownHandler, true)
-    })
-
-    return { wrapperStyle }
+    return { onEsc }
   },
 })
 </script>
@@ -80,7 +62,6 @@ export default defineComponent({
   left: 0;
   width: 100%;
   height: 100%;
-  z-index: 199998;
   padding-top: 6em;
 }
 
@@ -94,11 +75,21 @@ export default defineComponent({
   height: 100%;
 }
 
+.mask-wrapper.transparent .mask {
+  background: transparent;
+  backdrop-filter: none;
+}
+
 .fade-enter-active, .fade-leave-active {
   transition: opacity .2s;
 }
 
 .fade-enter, .fade-leave-to {
   opacity: 0;
+}
+
+.content {
+  position: relative;
+  z-index: 1;
 }
 </style>

@@ -5,29 +5,38 @@
       @mousewheel="onMouseWheel"
       @scroll="handleShadow"
       @mouseenter="handleShadow"
+      @dblclick.self="onBlankDblClick"
       class="tabs">
       <div
         v-for="item in tabList"
         :key="item.key"
         :data-id="item.key"
-        :class="{tab: true, current: item.key === value, fixed: item.fixed}"
+        :class="{tab: true, current: item.key === value, fixed: item.fixed, temporary: item.temporary, [item.class || '']: true}"
         :title="item.description"
         :data-key="item.key"
         @contextmenu.exact.prevent.stop="showContextMenu(item)"
-        @mouseup="e => e.button === 1 ? removeTabs([item]) : null"
-        @click="switchTab(item)">
+        @mouseup.middle="removeTabs([item])"
+        @mousedown.left="switchTab(item)"
+        @dblclick.stop="onItemDblClick(item)">
         <div class="label">{{item.label}}</div>
-        <div v-if="item.fixed" class="icon" :title="$t('tabs.unpin')" @click.prevent.stop="toggleFix(item)">
+        <div v-if="item.fixed" class="icon" :title="$t('tabs.unpin')" @mousedown.prevent.stop @click.prevent.stop="toggleFix(item)">
           <svg-icon name="thumbtack" style="width: 10px; height: 10px;" />
         </div>
-        <div v-else class="icon" :title="$t('close')" @click.prevent.stop="removeTabs([item])">
+        <div v-else class="icon" :title="$t('close')" @mousedown.prevent.stop @click.prevent.stop="removeTabs([item])">
           <svg-icon name="times" style="width: 12px; height: 12px;" />
         </div>
       </div>
     </div>
-    <div ref="refFilterBtn" class="filter-btn" @click="showQuickFilter" :title="filterBtnTitle">
-      <svg-icon name="chevron-down" width="10px" />
+    <div ref="refFilterBtn" class="action-btn" style="order: -512" @click="showQuickFilter" :title="filterBtnTitle">
+      <svg-icon name="chevron-down" width="12px" />
     </div>
+    <template v-for="(btn, i) in [...actionBtns].filter(x => !x.hidden).sort((a: any, b: any) => ((a.order || 0) - (b.order || 0)))">
+      <div  v-if="btn.type === 'separator'" class="action-btn-separator" :key="i" />
+      <div v-else-if="btn.type === 'normal'" :key="btn.key || `${i}`" class="action-btn" @click="btn.onClick" :title="btn.title" :style="btn.style">
+        <svg-icon :name="btn.icon" width="12px" />
+      </div>
+      <component v-else-if="btn.type === 'custom'" :key="btn.key || `custom-${i}`" :is="btn.component" />
+    </template>
   </div>
 </template>
 
@@ -39,7 +48,7 @@ import { useContextMenu } from '@fe/support/ui/context-menu'
 import { useQuickFilter } from '@fe/support/ui/quick-filter'
 import { useI18n } from '@fe/services/i18n'
 import type { Components } from '@fe/types'
-import { registerHook } from '@fe/core/hook'
+import { registerHook, removeHook } from '@fe/core/hook'
 import SvgIcon from './SvgIcon.vue'
 
 export default defineComponent({
@@ -52,8 +61,16 @@ export default defineComponent({
       required: true,
     },
     filterBtnTitle: String,
+    actionBtns: {
+      type: Array as () => Components.Tabs.ActionBtn[],
+      default: () => [],
+    },
+    hookContextMenu: {
+      type: Function as unknown as () => ((item: Components.Tabs.Item, menus: Components.ContextMenu.Item[]) => void),
+      default: () => undefined,
+    }
   },
-  emits: ['input', 'remove', 'switch', 'change-list'],
+  emits: ['input', 'remove', 'switch', 'change-list', 'dblclick-blank', 'dblclick-item'],
   setup (props, { emit }) {
     const { t } = useI18n()
 
@@ -75,6 +92,14 @@ export default defineComponent({
 
     function removeTabs (items: Components.Tabs.Item[]) {
       emit('remove', items)
+    }
+
+    function onItemDblClick (item: Components.Tabs.Item) {
+      emit('dblclick-item', item)
+    }
+
+    function onBlankDblClick (e: MouseEvent) {
+      emit('dblclick-blank', e)
     }
 
     function removeOther (item: Components.Tabs.Item) {
@@ -132,12 +157,13 @@ export default defineComponent({
     function toggleFix (item: Components.Tabs.Item) {
       emit('change-list', props.list.map(x => ({
         ...x,
-        fixed: x.key === item.key ? !item.fixed : x.fixed
+        fixed: x.key === item.key ? !item.fixed : x.fixed,
+        temporary: x.key === item.key ? false : x.temporary,
       })))
     }
 
     function showContextMenu (item: Components.Tabs.Item) {
-      contextMenu.show([
+      const items: Components.ContextMenu.Item[] = [
         { id: 'close', label: t('close'), onClick: () => removeTabs([item]) },
         { id: 'close-others', label: t('tabs.close-others'), onClick: () => removeOther(item) },
         { id: 'close-right', label: t('tabs.close-right'), onClick: () => removeRight(item) },
@@ -145,7 +171,11 @@ export default defineComponent({
         { id: 'close-all', label: t('tabs.close-all'), onClick: () => removeAll() },
         { type: 'separator' },
         { id: 'fix', label: item.fixed ? t('tabs.unpin') : t('tabs.pin'), onClick: () => toggleFix(item) },
-      ])
+      ]
+
+      props.hookContextMenu?.(item, items)
+
+      contextMenu.show(items)
     }
 
     function showQuickFilter () {
@@ -204,12 +234,13 @@ export default defineComponent({
 
     onMounted(() => {
       initSortable()
-      window.addEventListener('keydown', handleKeydown, true)
+      registerHook('GLOBAL_KEYDOWN', handleKeydown)
       registerHook('GLOBAL_RESIZE', handleShadow)
     })
 
     onBeforeUnmount(() => {
-      window.removeEventListener('keydown', handleKeydown, true)
+      removeHook('GLOBAL_KEYDOWN', handleKeydown)
+      removeHook('GLOBAL_RESIZE', handleShadow)
       sortable?.destroy()
     })
 
@@ -223,11 +254,11 @@ export default defineComponent({
       }
     })
 
-    watch(() => props.value, () => {
+    watch([() => props.value, () => props.actionBtns], () => {
       nextTick(() => {
         handleShadow()
         const el = refTabs.value?.querySelector<any>('.tab.current')
-        el?.scrollIntoViewIfNeeded(true)
+        el?.scrollIntoViewIfNeeded(false)
       })
     })
 
@@ -236,6 +267,8 @@ export default defineComponent({
       switchTab,
       showContextMenu,
       removeTabs,
+      onItemDblClick,
+      onBlankDblClick,
       tabList,
       toggleFix,
       handleShadow,
@@ -257,15 +290,15 @@ export default defineComponent({
   align-items: center;
   background: var(--g-color-87);
 
-  .filter-btn {
+  .action-btn {
     flex: none;
-    width: 20px;
-    height: 20px;
-    margin: 0 5px;
+    width: 22px;
+    height: 22px;
+    margin: 0 3px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--g-color-30);
+    color: var(--g-color-20);
 
     &:hover {
       color: var(--g-color-0);
@@ -279,17 +312,19 @@ export default defineComponent({
   height: 100%;
   display: flex;
   z-index: 1;
-  box-shadow: 0px 3px 3px -3px var(--g-color-90);
   width: 100%;
   overflow-x: hidden;
   overflow-y: hidden;
+  order: -1024;
 
   &::before,
   &::after {
     content: '';
-    position: absolute;
+    position: sticky;
     top: 0;
     width: 4px;
+    flex: none;
+    margin-left: -4px;
     height: 30px;
     display: block;
     pointer-events: none;
@@ -299,12 +334,12 @@ export default defineComponent({
 
   &::before {
     left: 0;
-    background: linear-gradient(to right, rgba(0, 0, 0, 0.1), transparent);
+    background: linear-gradient(to right, rgba(var(--g-color-70-rgb), 0.9), transparent);
   }
 
   &::after {
-    right: 30px;
-    background: linear-gradient(to left, rgba(0, 0, 0, 0.1), transparent);
+    right: 0;
+    background: linear-gradient(to left, rgba(var(--g-color-70-rgb), 0.9), transparent);
   }
 
   &.left::before {
@@ -384,5 +419,23 @@ export default defineComponent({
 .tab.fixed {
   font-weight: bold;
   border-left: 2px var(--g-color-70) solid;
+}
+
+.tab.temporary {
+  font-style: italic;
+}
+
+.action-btn-separator {
+  width: 1px;
+  height: 14px;
+  background: var(--g-color-70);
+  margin: 0 3px;
+  flex: none;
+
+  &:first-child,
+  &:last-child,
+  & + .action-btn-separator {
+    display: none;
+  }
 }
 </style>

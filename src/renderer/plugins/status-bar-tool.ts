@@ -4,34 +4,33 @@ export default {
   name: 'status-bar-tool',
   register: ctx => {
     ctx.statusBar.tapMenus(menus => {
+      const printExportVisible = (!ctx.store.state.previewer || ctx.store.state.previewer === 'default') &&
+        ctx.store.state.currentFile && ctx.doc.isMarkdownFile(ctx.store.state.currentFile)
+
       menus['status-bar-tool'] = {
         id: 'status-bar-tool',
         position: 'left',
         title: ctx.i18n.t('status-bar.tool.tool'),
         list: [
           {
-            id: 'extension-manager',
-            type: 'normal',
-            title: ctx.i18n.t('status-bar.tool.extension-manager'),
-            onClick: () => ctx.showExtensionManager(),
-          },
-          {
             id: 'print',
             type: 'normal',
             title: ctx.i18n.t('status-bar.tool.print'),
-            hidden: !ctx.store.state.currentFile,
+            hidden: !printExportVisible,
+            ellipsis: true,
             onClick: () => {
               setTimeout(() => {
-                ctx.doc.print()
+                ctx.export.printCurrentDocument()
               }, 0)
             },
           },
           {
             id: 'export',
             type: 'normal',
-            hidden: !ctx.store.state.currentFile,
+            hidden: !printExportVisible,
+            ellipsis: true,
             title: ctx.i18n.t('status-bar.tool.export'),
-            onClick: () => ctx.doc.showExport(),
+            onClick: () => ctx.export.toggleExportPanel(),
           },
           {
             type: 'separator'

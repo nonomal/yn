@@ -13,8 +13,18 @@ export default {
             id: 'show-quick-open',
             type: 'normal',
             title: ctx.i18n.t('status-bar.nav.goto'),
-            subTitle: ctx.command.getKeysLabel('filter.show-quick-open'),
-            onClick: () => ctx.action.getActionHandler('filter.show-quick-open')()
+            subTitle: ctx.keybinding.getKeysLabel('workbench.show-quick-open'),
+            ellipsis: true,
+            onClick: () => ctx.action.getActionHandler('workbench.show-quick-open')()
+          },
+          {
+            id: 'reveal-current-file-in-sidebar',
+            hidden: ctx.store.state.currentRepo?.name !== ctx.store.state.currentFile?.repo,
+            type: 'normal',
+            title: ctx.i18n.t('status-bar.nav.reveal-current-file-in-sidebar'),
+            subTitle: ctx.keybinding.getKeysLabel('tree.reveal-current-node'),
+            ellipsis: false,
+            onClick: () => ctx.action.getActionHandler('tree.reveal-current-node')()
           },
           { type: 'separator' },
         ]

@@ -9,11 +9,11 @@ export default {
       menus['status-bar-presentation'] = {
         id: 'status-bar-presentation',
         position: 'right',
-        tips: ctx.i18n.t('status-bar.present') + ` (${ctx.command.getKeysLabel(action!.name)})`,
+        tips: ctx.i18n.t('status-bar.present') + ` (${ctx.keybinding.getKeysLabel(action!.name)})`,
         icon: 'presentation',
         onClick: () => {
           ctx.view.enterPresent()
-          ctx.controlCenter.toggle(false)
+          ctx.workbench.ControlCenter.toggle(false)
         }
       }
     })

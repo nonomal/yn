@@ -11,7 +11,10 @@ export const getMainMenus = () => process.platform === 'darwin' ? Menu.buildFrom
     submenu: [
       { type: 'normal', label: $t('app.preferences'), click: () => getAction('show-main-window-setting')() },
       { type: 'normal', label: $t('app.toggle-fullscreen'), accelerator: 'Ctrl+command+F', click: () => getAction('toggle-fullscreen')() },
-      { type: 'normal', label: $t('app.quit'), accelerator: 'Command+Q', click: () => getAction('quit')() }
+      { type: 'separator' },
+      { role: 'services', submenu: [] },
+      { type: 'separator' },
+      { type: 'normal', label: $t('app.quit'), accelerator: 'Command+Q', click: () => getAction('quit')() },
     ]
   },
   {
@@ -25,7 +28,12 @@ export const getMainMenus = () => process.platform === 'darwin' ? Menu.buildFrom
       { role: 'paste', accelerator: 'CmdOrCtrl+V', },
       { role: 'selectAll', accelerator: 'CmdOrCtrl+A' }
     ]
-  }
+  },
+  // support multiple window
+  {
+    role: 'window',
+    submenu: [{ role: 'minimize' }, { role: 'close' }]
+  },
 ]) : null
 
 export const getTrayMenus = () => Menu.buildFromTemplate([

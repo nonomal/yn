@@ -48,6 +48,8 @@ const extensions = [
   '.java',
   '.jav',
   '.js',
+  '.mjs',
+  '.cjs',
   '.es6',
   '.jsx',
   '.kt',
@@ -112,6 +114,8 @@ const extensions = [
   '.swift',
   '.tcl',
   '.ts',
+  '.mts',
+  '.cts',
   '.tsx',
   '.vb',
   '.xml',
@@ -141,11 +145,19 @@ const extensions = [
   '.azcli',
   '.cls',
   '.graphql',
-  '.gql'
+  '.gql',
+  '.bib',
+  '.plantuml',
+  '.dot',
+  '.gv',
+  '.puml',
+  '.lrc',
 ]
 
 const supported = (name: string) => {
-  return extensions.includes(extname(name.toLowerCase()))
+  name = name.toLowerCase()
+  const ext = extname(name) || (name.startsWith('.') ? name : '')
+  return ext ? extensions.includes(ext) : false
 }
 
 export default {
