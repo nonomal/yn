@@ -3,10 +3,10 @@
 import { h } from 'vue'
 import Markdown from 'markdown-it'
 import StateInline from 'markdown-it/lib/rules_inline/state_inline'
-import { getKeyLabel } from '@fe/core/command'
+import { getKeyLabel } from '@fe/core/keybinding'
 import ctx, { Plugin } from '@fe/context'
 
-const slugify = (s: string) => encodeURIComponent(String(s).trim().toLowerCase().replace(/\s+/g, '-'))
+const slugify = (s: string) => String(s).trim().replace(/\s+/g, '-')
 
 const defaults = {
   level: [2, 3],
@@ -112,8 +112,10 @@ const MarkdownItPlugin = (md: Markdown, o: any) => {
 
       const slug = options.slugify(heading.content)
 
-      buffer = `<li><a href="#${slug}">`
-      buffer += typeof options.format === 'function' ? options.format(heading.content) : heading.content
+      buffer = `<li><a href="#${slug.replace(/"/g, '&quot;')}">`
+      buffer += typeof options.format === 'function'
+        ? options.format(heading.content)
+        : heading.content.replaceAll('<', '&lt;').replaceAll('>', '&gt;')
       buffer += '</a>'
       i++
     }
@@ -204,7 +206,7 @@ const MarkdownItPlugin = (md: Markdown, o: any) => {
 export default {
   name: 'markdown-toc',
   register: ctx => {
-    ctx.theme.addStyles(`
+    ctx.view.addStyles(`
       .markdown-view .markdown-body .table-of-contents ol {
         counter-reset: ol-number;
         list-style-type: none;
@@ -225,6 +227,15 @@ export default {
         content: counter(ol-number) ". ";
       }
     `)
+
     ctx.markdown.registerPlugin(MarkdownItPlugin)
+
+    ctx.editor.tapSimpleCompletionItems(items => {
+      /* eslint-disable no-template-curly-in-string */
+
+      items.push(
+        { label: '/ [toc] Table of content', insertText: '[toc]{type: "${1|ul,ol|}", level: [2,3]}', block: true },
+      )
+    })
   }
 } as Plugin

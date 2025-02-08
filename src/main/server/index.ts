@@ -1,22 +1,28 @@
 import * as os from 'os'
 import ip from 'ip'
 import * as fs from 'fs-extra'
+import uniq from 'lodash/uniq'
+import type NodePty from 'node-pty'
+import isEqual from 'lodash/isEqual'
 import * as path from 'path'
 import Koa from 'koa'
 import bodyParser from 'koa-body'
 import * as mime from 'mime'
-import request from 'request'
+import * as undici from 'undici'
 import { promisify } from 'util'
-import { STATIC_DIR, HOME_DIR, HELP_DIR, USER_PLUGIN_DIR, FLAG_DISABLE_SERVER, APP_NAME, USER_THEME_DIR, RESOURCES_DIR, BUILD_IN_STYLES, USER_EXTENSION_DIR } from '../constant'
+import { STATIC_DIR, HOME_DIR, HELP_DIR, USER_PLUGIN_DIR, FLAG_DISABLE_SERVER, APP_NAME, USER_THEME_DIR, RESOURCES_DIR, BUILD_IN_STYLES, USER_EXTENSION_DIR, USER_DATA } from '../constant'
 import * as file from './file'
+import * as search from './search'
 import run from './run'
 import convert from './convert'
 import plantuml from './plantuml'
+import * as premium from './premium'
 import shell from '../shell'
 import config from '../config'
 import * as jwt from '../jwt'
 import { getAction } from '../action'
 import * as extension from '../extension'
+import type { FileReadResult } from '../../share/types'
 
 const isLocalhost = (address: string) => {
   return ip.isEqual(address, '127.0.0.1') || ip.isEqual(address, '::1')
@@ -33,7 +39,7 @@ const noCache = (ctx: any) => {
 }
 
 const checkPermission = (ctx: any, next: any) => {
-  const token = ctx.query._token || (ctx.headers.authorization || '').replace('Bearer ', '')
+  const token = ctx.query._token || (ctx.headers['x-yn-authorization'] ?? (ctx.headers.authorization || '')).replace('Bearer', '').trim()
 
   if (ctx.req._protocol || (!token && isLocalhost(ctx.request.ip))) {
     ctx.req.jwt = { role: 'admin' }
@@ -58,6 +64,7 @@ const checkPermission = (ctx: any, next: any) => {
     guest: [
       '/api/file',
       '/api/settings',
+      '/api/proxy-fetch'
     ]
   }
 
@@ -86,23 +93,51 @@ const checkPermission = (ctx: any, next: any) => {
   throw new Error('Forbidden')
 }
 
+const isAdmin = (ctx: any) => ctx.req.jwt && ctx.req.jwt.role === 'admin'
+
+const checkIsAdmin = (ctx: any) => {
+  if (!isAdmin(ctx)) {
+    throw new Error('Forbidden')
+  }
+}
+
+const checkPrivateRepo = (ctx: any, repo: string) => {
+  if (repo.startsWith('__')) {
+    checkIsAdmin(ctx)
+  }
+}
+
 const fileContent = async (ctx: any, next: any) => {
   if (ctx.path === '/api/file') {
     if (ctx.method === 'GET') {
       const { repo, path, asBase64 } = ctx.query
+
+      checkPrivateRepo(ctx, repo)
+
+      const stat = await file.stat(repo, path)
+
+      // limit 30mb
+      if (stat.size > 30 * 1024 * 1024) {
+        throw new Error('File is too large.')
+      }
+
       const content = await file.read(repo, path)
 
-      ctx.body = result('ok', 'success', {
+      const data: FileReadResult = {
         content: content.toString(asBase64 ? 'base64' : undefined),
-        hash: await file.hash(repo, path)
-      })
+        hash: await file.hash(repo, path),
+        stat: await file.stat(repo, path),
+        writeable: await file.checkWriteable(repo, path),
+      }
+
+      ctx.body = result('ok', 'success', data)
     } else if (ctx.method === 'POST') {
       const { oldHash, content, asBase64, repo, path } = ctx.request.body
 
       if (!oldHash) {
         throw new Error('No hash.')
       } else if (oldHash === 'new' && (await file.exists(repo, path))) {
-        throw new Error('File already exists.')
+        throw new Error('File or directory already exists.')
       } else if (oldHash !== 'new' && !(await file.checkHash(repo, path, oldHash))) {
         throw new Error('File is stale. Please refresh.')
       }
@@ -115,17 +150,39 @@ const fileContent = async (ctx: any, next: any) => {
         )
       }
 
-      const hash: string = await file.write(repo, path, saveContent)
-      ctx.body = result('ok', 'success', hash)
+      ctx.body = result('ok', 'success', {
+        hash: await file.write(repo, path, saveContent),
+        stat: await file.stat(repo, path),
+      })
     } else if (ctx.method === 'DELETE') {
-      await file.rm(ctx.query.repo, ctx.query.path)
+      const trash = ctx.query.trash !== 'false'
+      await file.rm(ctx.query.repo, ctx.query.path, trash)
       ctx.body = result()
     } else if (ctx.method === 'PATCH') {
-      await file.mv(ctx.request.body.repo, ctx.request.body.oldPath, ctx.request.body.newPath)
+      const { repo, oldPath, newPath } = ctx.request.body
+      if (oldPath === newPath) {
+        throw new Error('No change.')
+      }
+
+      if ((await file.exists(repo, newPath)) && newPath.toLowerCase() !== oldPath.toLowerCase()) {
+        throw new Error('File or directory already exists.')
+      }
+
+      await file.mv(repo, oldPath, newPath)
+      ctx.body = result()
+    } else if (ctx.method === 'PUT') {
+      const { repo, oldPath, newPath } = ctx.request.body
+      if ((await file.exists(repo, newPath))) {
+        throw new Error('File or directory already exists.')
+      }
+
+      await file.cp(repo, oldPath, newPath)
       ctx.body = result()
     }
   } else if (ctx.path === '/api/tree') {
-    ctx.body = result('ok', 'success', (await file.tree(ctx.query.repo)))
+    const arr = (ctx.query.sort || '').split('-')
+    const sort = { by: arr[0] || 'name', order: arr[1] || 'asc' }
+    ctx.body = result('ok', 'success', (await file.tree(ctx.query.repo, sort, ctx.query.include, ctx.query.noEmptyDir === 'true')))
   } else if (ctx.path === '/api/history/list') {
     ctx.body = result('ok', 'success', (await file.historyList(ctx.query.repo, ctx.query.path)))
   } else if (ctx.path === '/api/history/content') {
@@ -136,6 +193,9 @@ const fileContent = async (ctx: any, next: any) => {
   } else if (ctx.path === '/api/history/comment') {
     const { repo, path, version, msg } = ctx.request.body
     ctx.body = result('ok', 'success', (await file.commentHistoryVersion(repo, path, version, msg)))
+  } else if (ctx.path === '/api/watch-file') {
+    const { repo, path, options } = ctx.request.body
+    ctx.body = await file.watchFile(repo, path, options)
   } else {
     await next()
   }
@@ -147,12 +207,58 @@ const attachment = async (ctx: any, next: any) => {
       const path = ctx.request.body.path
       const repo = ctx.request.body.repo
       const attachment = ctx.request.body.attachment
+      const exists = ctx.request.body.exists
       const buffer = Buffer.from(attachment.substring(attachment.indexOf(',') + 1), 'base64')
-      await file.upload(repo, buffer, path)
-      ctx.body = result('ok', 'success', path)
+      const res = await file.upload(repo, buffer, path, exists)
+      ctx.body = result('ok', 'success', res)
     } else if (ctx.method === 'GET') {
-      ctx.type = mime.getType(ctx.query.path)
-      ctx.body = await file.read(ctx.query.repo, ctx.query.path)
+      let { repo, path } = ctx.query
+
+      if (!repo || !path) {
+        const filePath = ctx.path.replace('/api/attachment', '')
+        const arr = filePath.split('/')
+        repo = decodeURIComponent(arr[1] || '')
+        path = decodeURI(arr.slice(2).join('/'))
+      }
+
+      if (!repo || !path) {
+        throw new Error('Invalid path.')
+      }
+
+      checkPrivateRepo(ctx, repo)
+
+      noCache(ctx)
+
+      try {
+        // support range
+        const range = ctx.headers.range
+        if (range) {
+          const { size } = await file.stat(repo, path)
+          const requestRange = range.replace('bytes=', '').split('-').map((x: string) => parseInt(x || '-1'))
+          const start = requestRange[0] < 0 ? 0 : requestRange[0]
+          const end = requestRange[1] < 0
+            ? size - 1
+            : requestRange[1]
+
+          const chunkSize = end - start + 1
+
+          ctx.status = 206
+          ctx.set('Content-Range', `bytes ${start}-${end}/${size}`)
+          ctx.set('Accept-Ranges', 'bytes')
+          ctx.set('Content-Length', chunkSize)
+          ctx.body = await file.createReadStream(repo, path, { start, end })
+        } else {
+          ctx.body = await file.read(repo, path)
+        }
+        ctx.type = mime.getType(path)
+      } catch (error: any) {
+        if (error.code === 'ENOENT') {
+          ctx.status = 404
+          ctx.body = result('error', 'Not found')
+        } else {
+          throw error
+        }
+      }
     }
   } else {
     await next()
@@ -160,21 +266,20 @@ const attachment = async (ctx: any, next: any) => {
 }
 
 const searchFile = async (ctx: any, next: any) => {
-  if (ctx.path.startsWith('/api/search')) {
-    const search = ctx.query.search
-    const repo = ctx.query.repo
-
-    ctx.body = result('ok', 'success', await file.search(repo, search))
+  if (ctx.path.startsWith('/api/search') && ctx.method === 'POST') {
+    const query = ctx.request.body.query
+    ctx.body = await search.search(query)
   } else {
     await next()
   }
 }
 
 const plantumlGen = async (ctx: any, next: any) => {
-  if (ctx.path.startsWith('/api/plantuml/png')) {
-    ctx.type = 'image/png'
+  if (ctx.path.startsWith('/api/plantuml')) {
     try {
-      ctx.body = await plantuml(ctx.query.data)
+      const { type, content } = await plantuml(ctx.query.data)
+      ctx.type = type
+      ctx.body = content
       ctx.set('cache-control', 'max-age=86400') // 1 day.
     } catch (error) {
       ctx.body = error
@@ -232,24 +337,141 @@ const tmpFile = async (ctx: any, next: any) => {
   }
 }
 
-const proxy = async (ctx: any, next: any) => {
-  if (ctx.path.startsWith('/api/proxy')) {
-    const data = ctx.method === 'POST' ? ctx.request.body : ctx.query
-    const url = data.url
-    const options = typeof data.options === 'string' ? JSON.parse(ctx.query.options) : data.options
-    const agent = await getAction('get-proxy-agent')(url)
-    await new Promise<void>((resolve, reject) => {
-      request({ url, agent, encoding: null, ...options }, function (err: any, response: any, body: any) {
-        if (err) {
-          reject(err)
-        } else {
-          ctx.status = response.statusCode
-          ctx.set('content-type', response.headers['content-type'])
-          ctx.body = body
-          resolve()
+const userFile = async (ctx: any, next: any) => {
+  if (ctx.path.startsWith('/api/user-file')) {
+    const filePath = ctx.query.name.replace(/\.+/g, '.') // replace multiple dots with one dot
+
+    if (!filePath) {
+      throw new Error('Invalid path')
+    }
+
+    const absPath = path.join(USER_DATA, filePath)
+
+    if (ctx.method === 'GET') {
+      ctx.body = await fs.readFile(absPath)
+    } else if (ctx.method === 'POST') {
+      let body: any = ctx.request.body.toString()
+
+      if (ctx.query.asBase64) {
+        body = Buffer.from(
+          body.startsWith('data:') ? body.substring(body.indexOf(',') + 1) : body,
+          'base64'
+        )
+      }
+
+      await fs.ensureFile(absPath)
+      await fs.writeFile(absPath, body)
+      ctx.body = result('ok', 'success', { path: absPath })
+    } else if (ctx.method === 'DELETE') {
+      await fs.unlink(absPath)
+      ctx.body = result('ok', 'success')
+    }
+  } else if (ctx.path.startsWith('/api/user-dir')) {
+    const dirPath = ctx.query.name.replace(/\.+/g, '.') // replace multiple dots with one dot
+
+    if (!dirPath) {
+      throw new Error('Invalid path')
+    }
+
+    const absPath = path.join(USER_DATA, dirPath)
+
+    if (ctx.method === 'GET') {
+      const recursive = ctx.query.recursive === 'true'
+
+      const data: ({ name: string, absolutePath: string, path: string, isFile: boolean, isDir: boolean })[] = []
+
+      const readDirRecursive = async (dir: string) => {
+        const items = await fs.readdir(dir, { withFileTypes: true })
+
+        for (const item of items) {
+          const absolutePath = path.resolve(dir, item.name)
+          data.push({
+            name: item.name,
+            absolutePath,
+            path: path.relative(absPath, absolutePath).replace(/\\/g, '/'),
+            isFile: item.isFile(),
+            isDir: item.isDirectory(),
+          })
+
+          if (recursive && item.isDirectory()) {
+            await readDirRecursive(absolutePath)
+          }
         }
+      }
+
+      await readDirRecursive(absPath)
+
+      ctx.body = result('ok', 'success', data)
+    }
+  } else {
+    await next()
+  }
+}
+
+const proxy = async (ctx: any, next: any) => {
+  if (ctx.path.startsWith('/api/proxy-fetch/')) {
+    const url = ctx.originalUrl.replace(/^.*\/api\/proxy-fetch\//, '')
+
+    // TODO ssrf
+    // const _url = new URL(url)
+    // if (
+    //   _url.hostname === 'localhost' ||
+    //   (
+    //     (ip.isV4Format(_url.hostname) || ip.isV6Format(_url.hostname)) &&
+    //     ip.isPrivate(_url.hostname)
+    //   )
+    // ) {
+    //   throw new Error('Invalid URL')
+    // }
+
+    let signal: AbortSignal | undefined
+    let timeoutTimer: NodeJS.Timeout | undefined
+
+    try {
+      const {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        host,
+        'x-proxy-url': proxyUrl,
+        'x-proxy-timeout': proxyTimeout,
+        'x-proxy-max-redirections': maxRedirections = '3',
+        ...headers
+      } = ctx.headers
+
+      const dispatcher = proxyUrl
+        ? getAction('new-proxy-dispatcher')(proxyUrl)
+        : await getAction('get-proxy-dispatcher')(url)
+
+      if (proxyTimeout) {
+        const controller = new AbortController()
+        signal = controller.signal
+        timeoutTimer = setTimeout(() => {
+          controller.abort()
+          timeoutTimer = undefined
+        }, Number(proxyTimeout))
+      }
+
+      const response = await undici.request(url, {
+        dispatcher,
+        method: ctx.method,
+        headers,
+        body: ctx.req,
+        signal,
+        maxRedirections: Number(maxRedirections)
       })
-    })
+
+      // Set the response status, headers, and body
+      ctx.status = response.statusCode
+      ctx.set(response.headers)
+      ctx.body = response.body
+
+      response.body.once('close', () => {
+        timeoutTimer && clearTimeout(timeoutTimer)
+      })
+    } catch (error: any) {
+      ctx.status = 500
+      timeoutTimer && clearTimeout(timeoutTimer)
+      throw error
+    }
   } else {
     await next()
   }
@@ -277,9 +499,9 @@ const userPlugin = async (ctx: any, next: any) => {
     let code = ''
     for (const x of await fs.readdir(USER_PLUGIN_DIR, { withFileTypes: true })) {
       if (x.isFile() && x.name.endsWith('.js')) {
-        code += `// ===== ${x.name} =====\n` +
+        code += `;(async function () {; // ===== ${x.name} =====\n` +
           (await fs.readFile(path.join(USER_PLUGIN_DIR, x.name))) +
-          '\n// ===== end =====\n\n'
+          '\n;})(); // ===== end =====\n\n'
       }
     }
 
@@ -340,13 +562,20 @@ const setting = async (ctx: any, next: any) => {
   if (ctx.path.startsWith('/api/settings')) {
     if (ctx.method === 'GET') {
       const getSettings = () => {
-        if (ctx.req.jwt && ctx.req.jwt.role === 'admin') {
+        if (isAdmin(ctx)) {
           return config.getAll()
         } else {
           const data = { ...config.getAll() }
           data.repositories = {}
           data.mark = []
-          delete data['server.jwt-secret']
+
+          // remove sensitive data
+          Object.keys(data).forEach((key) => {
+            if (key.endsWith('-token') || key.endsWith('-secret')) {
+              delete data[key]
+            }
+          })
+
           delete data.license
           delete data.extensions
           return data
@@ -365,6 +594,9 @@ const setting = async (ctx: any, next: any) => {
       const data = { ...oldConfig, ...ctx.request.body }
       config.setAll(data)
 
+      const changedKeys = uniq([...Object.keys(oldConfig), ...Object.keys(data)])
+        .filter((key) => !isEqual(data[key], oldConfig[key]))
+
       if (oldConfig.language !== data.language) {
         getAction('i18n.change-language')(data.language)
       }
@@ -375,6 +607,7 @@ const setting = async (ctx: any, next: any) => {
 
       getAction('proxy.reload')(data)
       getAction('envs.reload')(data)
+      getAction('shortcuts.reload')(changedKeys)
 
       ctx.body = result('ok', 'success')
     }
@@ -467,9 +700,21 @@ const userExtension = async (ctx: any, next: any) => {
       ctx.body = result('ok', 'success', await extension.enable(id))
     } else if (ctx.path.startsWith('/api/extensions/disable')) {
       ctx.body = result('ok', 'success', await extension.disable(id))
+    } else if (ctx.path.startsWith('/api/extensions/abort-installation')) {
+      ctx.body = result('ok', 'success', await extension.abortInstallation())
     } else {
       await next()
     }
+  }
+}
+
+const premiumManage = async (ctx: any, next: any) => {
+  if (ctx.method === 'POST' && ctx.path.startsWith('/api/premium')) {
+    const { method, payload } = ctx.request.body
+    const data = await (premium as any)[method](payload)
+    ctx.body = result('ok', 'success', data)
+  } else {
+    await next()
   }
 }
 
@@ -487,31 +732,34 @@ const wrapper = async (ctx: any, next: any, fun: any) => {
 const server = (port = 3000) => {
   const app = new Koa()
 
+  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, checkPermission))
+  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, proxy))
+
   app.use(bodyParser({
     multipart: true,
-    formLimit: '20mb',
-    jsonLimit: '20mb',
-    textLimit: '20mb',
+    formLimit: '50mb',
+    jsonLimit: '50mb',
+    textLimit: '50mb',
     formidable: {
       maxFieldsSize: 268435456
     }
   }))
 
-  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, checkPermission))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, fileContent))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, attachment))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, plantumlGen))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, runCode))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, convertFile))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, searchFile))
-  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, proxy))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, readme))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, userPlugin))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, customCss))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, userExtension))
+  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, premiumManage))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, setting))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, choose))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, tmpFile))
+  app.use(async (ctx: any, next: any) => await wrapper(ctx, next, userFile))
   app.use(async (ctx: any, next: any) => await wrapper(ctx, next, rpc))
 
   // static file
@@ -526,7 +774,7 @@ const server = (port = 3000) => {
   const callback = app.callback()
 
   if (FLAG_DISABLE_SERVER) {
-    return callback
+    return { callback }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -534,7 +782,14 @@ const server = (port = 3000) => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const io = require('socket.io')(server, { path: '/ws' })
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pty = require('node-pty')
+
+  let pty: typeof NodePty | null = null
+
+  try {
+    pty = require('node-pty')
+  } catch (error) {
+    console.error(error)
+  }
 
   io.on('connection', (socket: any) => {
     if (!isLocalhost(socket.client.conn.remoteAddress)) {
@@ -542,32 +797,49 @@ const server = (port = 3000) => {
       return
     }
 
-    const ptyProcess = pty.spawn(shell.getShell(), [], {
-      name: 'xterm-color',
-      cols: 80,
-      rows: 24,
-      cwd: socket.handshake.query.cwd || HOME_DIR,
-      env: process.env
-    })
-    ptyProcess.onData((data: any) => socket.emit('output', data))
-    ptyProcess.onExit(() => socket.disconnect())
-    socket.on('input', (data: any) => {
-      if (data.startsWith(shell.CD_COMMAND_PREFIX)) {
-        ptyProcess.write(shell.transformCdCommand(data.toString()))
-      } else {
-        ptyProcess.write(data)
+    if (pty) {
+      const ptyProcess = pty.spawn(shell.getShell(), [], {
+        name: 'xterm-color',
+        cols: 80,
+        rows: 24,
+        cwd: socket.handshake.query.cwd || HOME_DIR,
+        env: process.env,
+        useConpty: false,
+      })
+
+      const kill = () => {
+        ptyProcess.kill()
       }
-    })
-    socket.on('resize', (size: any) => ptyProcess.resize(size[0], size[1]))
-    socket.on('disconnect', () => ptyProcess.kill())
+
+      ptyProcess.onData((data: any) => socket.emit('output', data))
+      ptyProcess.onExit(() => {
+        console.log('ptyProcess exit')
+        socket.disconnect()
+        process.off('exit', kill)
+      })
+
+      socket.on('input', (data: any) => {
+        if (data.startsWith(shell.CD_COMMAND_PREFIX)) {
+          ptyProcess.write(shell.transformCdCommand(data.toString()))
+        } else {
+          ptyProcess.write(data)
+        }
+      })
+      socket.on('resize', (size: any) => ptyProcess.resize(size[0], size[1]))
+      socket.on('disconnect', kill)
+
+      process.on('exit', kill)
+    } else {
+      socket.emit('output', 'node-pty is not compatible with this platform. Please install another version from GitHub https://github.com/purocean/yn/releases')
+    }
   })
 
-  const host = config.get('server.host', 'localhost')
+  const host = config.get('server.host', '127.0.0.1')
   server.listen(port, host)
 
   console.log(`Address: http://${host}:${port}`)
 
-  return callback
+  return { callback, server }
 }
 
 export default server

@@ -1,10 +1,10 @@
 # Yank Note
 
-A **hackable** markdown note application for programmers **[Download](https://github.com/purocean/yn/releases)** | **[Try it Online >>>](https://yank-note.vercel.app/)**
+A **highly extensible** Markdown editor, designed for productivity. **[Download](https://github.com/purocean/yn/releases)** | **[Try it Online >>>](https://demo.yank-note.com/)**
 
 [![Download](./help/mas_en.svg?.inline)](https://apps.apple.com/cn/app/yank-note/id1551528618) [Not recommended](https://github.com/purocean/yn/issues/65#issuecomment-1065799677)
 
-English | [中文说明](./README_ZH-CN.md)
+English | [中文说明](./README_ZH-CN.md) | [Русский](./README_RU.md)
 
 [toc]{level: [2]}
 
@@ -39,7 +39,7 @@ For more information on how to use the following functions, please see [characte
 - **To-do list:** support to display the to-do progress in the document. Click to quickly switch the to-do status.
 - **Quickly Open:** you can use shortcut key to open the file switch panel to quickly open files, tagged files, and full-text search for file contents.
 - **Integrated terminal:** support to open the terminal in the editor to quickly switch the current working directory
-- **Katex:** support katex expression
+- **LaTeX:** support LaTeX expression
 - **Style:** Markdown uses GitHub styles and features
 - **Repository:** multiple data locations can be defined for document classification
 - **External link conversion:** convert external link or Base64 pictures into local pictures
@@ -51,9 +51,9 @@ For more information on how to use the following functions, please see [characte
 - **Embedded Applets:** document supports embedded HTML Applets
 - **Embed PlantUML graphics:** document supports embedded plantUML graphics
 - **Embed drawio graphics:** document supports embedded drawio graphics
-- **Embed ECharts graphics:** document supports embeded Echarts graphics
-- **Embed Mermaid graphics:** document supports embeded Mermaid graphics
-- **Embed Luckysheet tables:** document supports embeded Luckysheet tables
+- **Embed ECharts graphics:** document supports embedded Echarts graphics
+- **Embed Mermaid graphics:** document supports embedded Mermaid graphics
+- **Embed Luckysheet tables:** document supports embedded Luckysheet tables
 - **Mind map:** nested list can be displayed in the form of a mind map
 - **Element attribute writing:** any attribute of an element can be customized
 - **Table enhancement:** support table title with multiple lines of text, list and other features
@@ -76,11 +76,11 @@ For more information on how to use the following functions, please see [characte
 
 ## Changelogs
 
-### [v3.36.1](https://github.com/purocean/yn/releases/tag/v3.36.1) 2022-09-16
+### [v3.81.3](https://github.com/purocean/yn/releases/tag/v3.81.3) 2025-02-06
 
-1. feat: support opening links containing `__allow-open-window__` inside the app
-2. fix: fix dark theme style
-3. fix: fix outline title focus problem
+[Windows](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-win-x64-3.81.3.exe) | [macOS arm64](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-mac-arm64-3.81.3.dmg) | [macOS x64](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-mac-x64-3.81.3.dmg) | [Linux AppImage](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-linux-x86_64-3.81.3.AppImage) | [Linux deb](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-linux-amd64-3.81.3.deb)
+
+1. fix: Fix the issue where directories might fail to be deleted on Windows
 
 [More release notes](https://github.com/purocean/yn/releases)
 

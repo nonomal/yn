@@ -1,7 +1,7 @@
-import { escapeRegExp, omit } from 'lodash-es'
+import { escapeRegExp, merge, omit } from 'lodash-es'
 import frontMatter from 'front-matter'
 import type { Plugin } from '@fe/context'
-import type { Doc } from '@fe/types'
+import type { BuildInSettings, Doc } from '@fe/types'
 import type { MenuItem } from '@fe/services/status-bar'
 import { render } from '@fe/services/view'
 import { t } from '@fe/services/i18n'
@@ -9,26 +9,38 @@ import { readFile } from '@fe/support/api'
 import { getLogger, md5 } from '@fe/utils'
 import { basename, dirname, resolve } from '@fe/utils/path'
 import { getPurchased } from '@fe/others/premium'
+import { isPlain } from '@fe/services/document'
 import ctx from '@fe/context'
 
 type Result = { __macroResult: true, vars?: Record<string, any>, value: string }
 type CacheItem = {
-  $define: Record<string, any>
   $include?: Record<string, CacheItem>
+  $define: Record<string, string>
 } & Record<string, Result | Promise<Result>>
-type MacroCache = Record<string, CacheItem>
 
 const logger = getLogger('plugin-macro')
+const debounceToast = ctx.lib.lodash.debounce((...args: [any, any]) => ctx.ui.useToast().show(...args), 300)
 const magicNewline = '--yn-macro-new-line--'
 
 const AsyncFunction = Object.getPrototypeOf(async () => 0).constructor
-let macroCache: MacroCache = {}
-let macroOuterVars = {}
+let globalMacroReplacement: Record<string, string> = {}
 
 const globalVars = {
   $export: exportVar,
+  $afterMacro: afterMacro,
   $ctx: ctx,
   $noop: noop,
+}
+
+function createSeq () {
+  const counters: Record<string, number> = {}
+  return function (str = '') {
+    if (!counters[str]) {
+      counters[str] = 0
+    }
+    counters[str]++
+    return `${str}${counters[str]}`
+  }
 }
 
 function lineCount (str: string) {
@@ -94,12 +106,13 @@ function transform (
     cache: CacheItem,
     callback?: (result: Result | Promise<Result>, match: string, matchPos: number) => void
   },
-) {
-  const define = { ...vars.define, ...options.cache.$define }
-  vars.define = define
+): { value: string, vars: Record<string, any> } {
+  let _vars: Record<string, any> = merge({ define: { ...globalMacroReplacement } }, vars)
+  const define = { ...options.cache.$define, ..._vars.define }
+  _vars.define = define
   const keys = Object.keys(define)
   if (keys.length) {
-    const reg = new RegExp(keys.map(escapeRegExp).join('|'), 'g')
+    const reg = new RegExp(keys.filter(Boolean).map(escapeRegExp).join('|'), 'g')
     src = src.replace(reg, match => {
       const val = define[match]
       // only support single line macro expression
@@ -113,7 +126,7 @@ function transform (
     })
   }
 
-  return src.replace(/\[=.+?=\]/gs, (match, matchPos) => {
+  const value = src.replace(/\[=.+?=\]/gs, (match, matchPos) => {
     try {
       const exp = match
         .substring(2, match.length - 2)
@@ -127,9 +140,7 @@ function transform (
         if (options.cache[id]) {
           result = options.cache[id]
         } else {
-          macroOuterVars = vars
-          result = macro(exp, vars)
-          macroOuterVars = {}
+          result = macro(exp, _vars)
           if (result instanceof Promise) {
             options.cache[id] = result
               .catch(() => ({ __macroResult: true, value: match } as Result))
@@ -147,24 +158,28 @@ function transform (
       options.callback?.(result, match, matchPos)
 
       if (result instanceof Promise) {
-        return 'macro is running……'
+        return 'running...'
       }
 
       if (result.vars) {
-        Object.assign(vars, result.vars, { define })
+        _vars = merge({}, result.vars, _vars)
       }
 
       return result.value
-    } catch {
-      macroOuterVars = {}
-    }
+    } catch {}
 
     return match.replaceAll(magicNewline, '\n')
   })
+
+  return { value, vars: _vars }
 }
 
 function exportVar (key: string, val: any): Result {
   return { __macroResult: true, vars: { [key]: val }, value: '' }
+}
+
+function afterMacro (fn: (src: string) => string): Result {
+  return { __macroResult: true, vars: { $__hook_after_macro: fn }, value: '' }
 }
 
 // do nothing, text placeholder
@@ -178,6 +193,7 @@ async function include (
     purchased: boolean,
     cache: CacheItem,
     count: number,
+    vars: Record<string, any>
   },
   path: string,
   trim = false
@@ -192,11 +208,9 @@ async function include (
     return { __macroResult: true, value: 'Error: $include maximum call stack size exceeded [3]' }
   }
 
-  if (!path.endsWith('.md')) {
-    return { __macroResult: true, value: 'Error: $include markdown file only' }
+  if (!isPlain({ type: 'file', path })) {
+    return { __macroResult: true, value: 'Error: $include path is not a plain file' }
   }
-
-  const outerVars = { ...macroOuterVars }
 
   try {
     const absolutePath = resolve(dirname(belongDoc.path), path)
@@ -205,26 +219,21 @@ async function include (
     const fm = frontMatter(content)
 
     // merge front-matter attributes to current document vars.
-    const vars: Record<string, any> = {
-      ...outerVars,
-      ...globalVars,
-      $include: include.bind(null, { ...options, belongDoc: file, count: options.count + 1 }),
-      $doc: {
-        basename: file.name ? file.name.substring(0, file.name.lastIndexOf('.')) : '',
-        ...ctx.lib.lodash.pick(file, 'name', 'repo', 'path', 'content', 'status')
-      },
+    const vars: Record<string, any> = merge(
+      {},
+      (fm.attributes && typeof fm.attributes === 'object') ? fm.attributes : {},
+      options.vars
+    )
+
+    vars.$include = include.bind(null, { ...options, belongDoc: file, count: options.count + 1, vars })
+    vars.$_doc = {
+      basename: file.name ? file.name.substring(0, file.name.lastIndexOf('.')) : '',
+      ...ctx.lib.lodash.pick(file, 'name', 'repo', 'path', 'content', 'status')
     }
 
     const cache = options.cache
     if (options.count === 0 && !options.cache.$include) {
       cache.$include = {}
-    }
-
-    if (fm.attributes && typeof fm.attributes === 'object') {
-      Object.assign(vars, fm.attributes)
-      if (vars.define && typeof vars.define === 'object') {
-        Object.assign(cache.$define, vars.define)
-      }
     }
 
     const cacheKey = '' + options.count + file.repo + file.path
@@ -235,7 +244,7 @@ async function include (
     const body = trim ? fm.body.trim() : fm.body
 
     const tasks: Promise<Result>[] = []
-    let value = transform(
+    let result = transform(
       body,
       vars,
       {
@@ -244,7 +253,10 @@ async function include (
         autoRerender: false,
         callback: res => {
           if (res instanceof Promise) {
-            tasks.push(res)
+            tasks.push(res.then(x => {
+              cache.$include![cacheKey].$define = { ...x.vars?.define }
+              return x
+            }))
           }
         }
       }
@@ -254,7 +266,7 @@ async function include (
       await Promise.allSettled(tasks)
 
       // get final result
-      value = transform(
+      result = transform(
         body,
         vars,
         {
@@ -265,49 +277,54 @@ async function include (
       )
     }
 
-    return { __macroResult: true, vars: omit(vars, '$include', '$doc'), value }
+    cache.$define = { ...result.vars.define }
+
+    return { __macroResult: true, vars: omit(result.vars, '$include', '$_doc'), value: result.value }
   } catch (error: any) {
     return error.message
   }
 }
 
+function hookAfter (body: string, vars: Record<string, any>) {
+  if (vars.$__hook_after_macro && typeof vars.$__hook_after_macro === 'function') {
+    try {
+      return vars.$__hook_after_macro(body)
+    } catch (error) {
+      debounceToast('warning', `[$afterMacro]: ${error}`)
+      return body
+    }
+  }
+
+  return body
+}
+
 export default {
   name: 'markdown-macro',
   register: ctx => {
-    // clear cache after view refresh
-    ctx.registerHook('VIEW_BEFORE_REFRESH', () => {
-      macroCache = {}
-    })
-
     ctx.markdown.registerPlugin(md => {
       md.core.ruler.after('normalize', 'after_normalize', (state) => {
         const env = state.env || {}
         const file = env.file || {}
 
-        const cacheKey = '' + file.repo + file.path
-        // remove other file cache.
-        macroCache = { [cacheKey]: macroCache[cacheKey] || { $define: {} } }
-
-        if (!env.attributes || !env.attributes.enableMacro) {
+        if (!env.attributes || !env.attributes.enableMacro || env.safeMode) {
           return false
         }
 
-        const cache = macroCache[cacheKey]
+        const cache = ctx.renderer.getRenderCache('plugin-macro', 'cache', { $define: {} } as CacheItem)
 
         const options = {
-          purchased: getPurchased() || file.repo === '__help__',
+          purchased: getPurchased() || file.repo === ctx.args.HELP_REPO_NAME,
           cache,
           autoRerender: true,
         }
 
-        const vars: Record<string, any> = {
-          ...globalVars,
-          $include: include.bind(null, { ...options, belongDoc: file, count: 0 }),
-          $doc: {
-            basename: file.name ? file.name.substring(0, file.name.lastIndexOf('.')) : '',
-            ...ctx.lib.lodash.pick(env.file, 'name', 'repo', 'path', 'content', 'status')
-          },
-          ...env.attributes,
+        const vars: Record<string, any> = { ...globalVars, ...env.attributes }
+
+        vars.$include = include.bind(null, { ...options, belongDoc: file, count: 0, vars })
+        vars.$seq = createSeq()
+        vars.$doc = {
+          basename: file.name ? file.name.substring(0, file.name.lastIndexOf('.')) : '',
+          ...ctx.lib.lodash.pick(env.file, 'name', 'repo', 'path', 'content', 'status')
         }
 
         if (!env.macroLines) {
@@ -321,7 +338,7 @@ export default {
         const head = state.src.substring(0, bodyBeginPos)
         const body = state.src.substring(bodyBeginPos)
 
-        state.src = head + transform(body, vars, {
+        const result = transform(body, vars, {
           ...options,
           callback: (result, match, matchPos) => {
             if (result instanceof Promise) {
@@ -352,6 +369,7 @@ export default {
           }
         })
 
+        state.src = head + hookAfter(result.value, result.vars)
         state.env.originSource = state.env.source
         state.env.source = state.src
 
@@ -364,10 +382,11 @@ export default {
         const list = menus['status-bar-tool']?.list
         if (list) {
           const id = 'plugin.markdown-macro.copy-markdown'
+          const env = ctx.view.getRenderEnv()
           const menu: MenuItem = {
             id,
             type: 'normal',
-            hidden: !(ctx.view.getRenderEnv()?.attributes?.enableMacro),
+            hidden: !(env?.attributes?.enableMacro) || env.safeMode,
             title: ctx.i18n.t('status-bar.tool.macro-copy-markdown'),
             onClick: () => {
               ctx.utils.copyText(ctx.view.getRenderEnv()?.source)
@@ -386,6 +405,90 @@ export default {
 
     ctx.registerHook('VIEW_RENDERED', () => {
       ctx.statusBar.refreshMenu()
+    })
+
+    ctx.editor.tapSimpleCompletionItems(items => {
+      /* eslint-disable no-template-curly-in-string */
+
+      items.push(
+        { label: '/ [= Macro', insertText: '[= ${1:1+1} =]' },
+        { label: '/ [= Macro $include', insertText: '[= \\$include(\'$1\') =]' },
+        { label: '/ [= Macro $afterMacro', insertText: '[= \\$afterMacro(src => { \n return src.toUpperCase(); \n}) =]' },
+      )
+    })
+
+    ctx.editor.tapMarkdownMonarchLanguage(mdLanguage => {
+      mdLanguage.tokenizer.root.unshift(
+        [/\[=/, { token: 'keyword', next: '@monacoEnd', nextEmbedded: 'text/javascript' }],
+      )
+
+      mdLanguage.tokenizer.monacoEnd = [
+        [/=\]/, { token: 'keyword', next: '@pop', nextEmbedded: '@pop' }]
+      ]
+    })
+
+    ctx.setting.changeSchema(schema => {
+      schema.groups.push({ label: 'T_setting-panel.tabs.macros', value: 'macros' })
+      schema.properties.macros = {
+        defaultValue: [],
+        type: 'array',
+        title: 'T_setting-panel.schema.repos.repos',
+        format: 'table',
+        group: 'macros',
+        items: {
+          type: 'object',
+          title: 'T_setting-panel.schema.macros.macros',
+          properties: {
+            match: {
+              type: 'string',
+              title: 'T_setting-panel.schema.macros.match',
+              defaultValue: '',
+              maxLength: 50,
+              options: {
+                inputAttributes: { placeholder: 'T_setting-panel.schema.macros.match-placeholder' }
+              },
+            },
+            replace: {
+              type: 'string',
+              title: 'T_setting-panel.schema.macros.replace',
+              defaultValue: '',
+              format: 'textarea',
+              options: {
+                inputAttributes: {
+                  placeholder: 'T_setting-panel.schema.macros.replace-placeholder',
+                  style: 'height: auto; resize: vertical; min-height: 37px;',
+                  rows: 1,
+                }
+              },
+            }
+          } as any
+        },
+      }
+    })
+
+    ctx.registerHook('SETTING_BEFORE_WRITE', ({ settings }) => {
+      if (settings.macros && Array.isArray(settings.macros)) {
+        settings.macros = settings.macros.filter(x => x.match && x.replace)
+      }
+    })
+
+    function buildGlobalMacroReplacement (settings: BuildInSettings) {
+      const macros = settings.macros || []
+      globalMacroReplacement = {}
+      macros.forEach(x => {
+        globalMacroReplacement[x.match] = x.replace
+      })
+    }
+
+    ctx.registerHook('SETTING_FETCHED', ({ settings }) => {
+      buildGlobalMacroReplacement(settings)
+    }, true)
+
+    ctx.registerHook('SETTING_CHANGED', ({ changedKeys, settings }) => {
+      if (changedKeys.includes('macros')) {
+        buildGlobalMacroReplacement(settings)
+        ctx.view.render()
+      }
     })
   }
 } as Plugin

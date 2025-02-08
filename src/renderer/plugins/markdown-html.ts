@@ -4,6 +4,7 @@ import StateInline from 'markdown-it/lib/rules_inline/state_inline'
 import Token from 'markdown-it/lib/token'
 import ParserInline from 'markdown-it/lib/parser_inline'
 import MarkdownIt from 'markdown-it'
+import { RenderEnv } from '@fe/types'
 
 const unquoted = '[^"\'=<>`\\x00-\\x20]+'
 const singleQuoted = "'[^']*'"
@@ -20,6 +21,19 @@ const comment = '(?:<!(--)|(--)>)'
 
 const HTML_TAG_RE = new RegExp('^(?:' + comment + '|' + openTag + '|' + closeTag + ')')
 const HTML_SELF_CLOSE_TAG_RE = new RegExp('^' + selfCloseTag, 'i')
+const INVALID_HTML_TAG_NAME_RE = /script/i
+const INVALID_ATTR_NAME_RE = /^on|^xmlns$|^xml$|^aria-|^srcdoc$/i
+const MULTI_LINE_TAG_RE = /^[^<]*<[A-Za-z][A-Za-z0-9]{0,20}[^>]*$/
+
+const SAFE_MODE_ALLOWED_TAGS = [
+  'br', 'b', 'i', 'strong', 'em', 'a', 'pre', 'code', 'img',
+  'tt', 'div', 'ins', 'del', 'sup', 'sub', 'p', 'ol', 'ul',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8',
+  'table', 'thead', 'tbody', 'tfoot', 'blockquote', 'dl', 'dt', 'dd', 'kbd',
+  'q', 'samp', 'var', 'hr', 'ruby', 'rt', 'rp', 'li', 'tr', 'td', 'th', 's',
+  'strike', 'summary', 'details', 'caption', 'figure', 'figcaption', 'abbr', 'bdo', 'cite',
+  'dfn', 'mark', 'small', 'span', 'time', 'wbr',
+]
 
 function isLetter (ch: number) {
   const lc = ch | 0x20 // to lower case
@@ -38,12 +52,26 @@ function setAttrs (token: Token, content: string) {
   const attrs: [string, any][] = []
   for (let i = 0; i < element.attributes.length; i++) {
     const attr = element.attributes[i]
-    attrs.push([attr.name, attr.value])
+
+    if (validateAttrName(attr.name)) {
+      attrs.push([attr.name, attr.value])
+    }
+
     token.attrs = attrs
   }
 }
 
-function htmlInline (state: StateInline): boolean {
+function validateTagName (name: string) {
+  return !INVALID_HTML_TAG_NAME_RE.test(name)
+}
+
+function validateAttrName (name: string) {
+  return !INVALID_ATTR_NAME_RE.test(name.trim())
+}
+
+function htmlInline (state: StateInline, silent = false): boolean {
+  if (silent) { return false }
+
   const pos = state.pos
 
   if (!state.md.options.html) { return false }
@@ -68,6 +96,10 @@ function htmlInline (state: StateInline): boolean {
   const tag = (match[1] || match[2] || match[3] || match[4] || '')
   if (!tag) { return false }
 
+  if ((state.env as RenderEnv).safeMode && !SAFE_MODE_ALLOWED_TAGS.includes(tag.toLowerCase())) {
+    return false
+  }
+
   const content = state.src.slice(pos, pos + match[0].length)
 
   // comment detected
@@ -85,7 +117,12 @@ function htmlInline (state: StateInline): boolean {
 
   let token: Token
   if (content.startsWith('</') || content.startsWith('-->')) {
+    if (!validateTagName(tag)) {
+      return false
+    }
+
     const prevHtmlTag = prevHtmlTags.pop()
+
     if (prevHtmlTags && prevHtmlTag === tag) {
       token = state.push('html_close', tag, -1)
     } else {
@@ -93,8 +130,16 @@ function htmlInline (state: StateInline): boolean {
       return false
     }
   } else if (content.endsWith('/>') || HTML_SELF_CLOSE_TAG_RE.test(content)) {
+    if (!validateTagName(tag)) {
+      return false
+    }
+
     token = state.push('html_self', tag, 0)
   } else {
+    if (!validateTagName(tag)) {
+      return false
+    }
+
     token = state.push('html_open', tag, 1)
     prevHtmlTags.push(tag)
   }
@@ -104,6 +149,31 @@ function htmlInline (state: StateInline): boolean {
 
   state.pos += match[0].length
   return true
+}
+
+function getMultiLineTag (args: {lineText: string, line: number, endLine: number, state: StateBlock, pos: number}) {
+  let { lineText, line, endLine, state, pos } = args
+
+  let currentLine = lineText
+
+  do {
+    // don't allow empty line
+    if (currentLine.length === 0 || state.sCount[line] < state.blkIndent) {
+      return false
+    }
+
+    if (currentLine.includes('>')) {
+      lineText = state.src.slice(pos, state.eMarks[line])
+      return { lineText, line }
+    }
+
+    line++
+    if (line >= endLine) {
+      return false
+    }
+
+    currentLine = state.src.slice(state.bMarks[line], state.eMarks[line])
+  } while (true)
 }
 
 function htmlBlock (state: StateBlock, startLine: number, endLine: number) {
@@ -117,10 +187,11 @@ function htmlBlock (state: StateBlock, startLine: number, endLine: number) {
   if (state.src.charCodeAt(pos) !== 0x3C/* < */) { return false }
 
   lineText = state.src.slice(pos, max)
+  nextLine = startLine
 
-  // comment detected
-  if (lineText.startsWith('<!--')) {
-    for (nextLine = startLine; nextLine < endLine; nextLine++) {
+  // multi-line comment detected
+  if (lineText.startsWith('<!--') && !lineText.includes('-->')) {
+    for (; nextLine < endLine; nextLine++) {
       pos = state.bMarks[nextLine] + state.tShift[nextLine]
       max = state.eMarks[nextLine]
       lineText = state.src.slice(pos, max)
@@ -138,6 +209,14 @@ function htmlBlock (state: StateBlock, startLine: number, endLine: number) {
     return true
   }
 
+  const multiLineTag = getMultiLineTag({ lineText, line: nextLine, endLine, state, pos })
+  if (multiLineTag) {
+    lineText = multiLineTag.lineText
+    nextLine = multiLineTag.line + 1
+  } else {
+    return false
+  }
+
   const inlineParse: any = state.md.inline.parse.bind(state.md.inline)
   const pushState = state.push
   const prevHtmlTags = (state.md as any)._prev_block_html_tags
@@ -146,15 +225,26 @@ function htmlBlock (state: StateBlock, startLine: number, endLine: number) {
   inlineParse(lineText, state.md, state.env, state.tokens, prevHtmlTags, pushState)
 
   // If we are here - we detected HTML block.
-  for (nextLine = startLine + 1; nextLine < endLine; nextLine++) {
+  for (; nextLine < endLine; nextLine++) {
     if (state.sCount[nextLine] < state.blkIndent) { break }
 
     pos = state.bMarks[nextLine] + state.tShift[nextLine]
     max = state.eMarks[nextLine]
     lineText = state.src.slice(pos, max)
 
+    // break if it's empty line when previous tag is empty or the empty line is flowing tag
     if (lineText.length === 0) {
       break
+    }
+
+    if (MULTI_LINE_TAG_RE.test(lineText)) {
+      const multiLineTag = getMultiLineTag({ lineText, line: nextLine, endLine, state, pos })
+      if (multiLineTag) {
+        lineText = multiLineTag.lineText
+        nextLine = multiLineTag.line
+      } else {
+        return false
+      }
     }
 
     inlineParse(lineText, state.md, state.env, state.tokens, prevHtmlTags, pushState)

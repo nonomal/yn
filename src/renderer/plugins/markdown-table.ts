@@ -1,9 +1,9 @@
-import { nextTick } from 'vue'
+import { nextTick, reactive } from 'vue'
 import Sortable from 'sortablejs'
 import { orderBy } from 'lodash-es'
 import type { Plugin } from '@fe/context'
 import { useModal } from '@fe/support/ui/modal'
-import { hasCtrlCmd } from '@fe/core/command'
+import { hasCtrlCmd } from '@fe/core/keybinding'
 import { DOM_ATTR_NAME, FLAG_READONLY } from '@fe/support/args'
 import { useToast } from '@fe/support/ui/toast'
 import { disableSyncScrollAwhile, renderImmediately } from '@fe/services/view'
@@ -181,7 +181,7 @@ async function editTableCell (start: number, end: number, cellIndex: number, inp
 
   let value = cellText
   let inComposition = false
-  let nextAction: 'edit-next-cell' | 'edit-prev-cell' | undefined
+  let nextAction: 'edit-next-cell' | 'edit-prev-cell' | 'edit-bellow-cell' | 'edit-above-cell' | undefined
   let isCancel = false
 
   if (input) {
@@ -223,13 +223,22 @@ async function editTableCell (start: number, end: number, cellIndex: number, inp
         }
 
         if (e.key === 'Enter') {
-          // insert br
-          if (e.shiftKey || hasCtrlCmd(e)) {
+          if (hasCtrlCmd(e) && !e.shiftKey && !e.altKey) {
+            // insert br
             const startPos = input.selectionStart
             const endPos = input.selectionEnd
             input.value = input.value.substring(0, startPos) + '\n' + input.value.substring(endPos)
+          } else if (hasCtrlCmd(e) && e.shiftKey) {
+            const td = input.parentElement as HTMLTableCellElement
+            ok()
+            addRow(td, 1)
+            nextAction = 'edit-bellow-cell'
+          } else if (e.shiftKey) {
+            ok()
+            nextAction = 'edit-above-cell'
           } else {
             ok()
+            nextAction = 'edit-bellow-cell'
           }
 
           e.preventDefault()
@@ -332,6 +341,22 @@ async function handleClick (e: MouseEvent, modal: boolean) {
               handleEditTableCell(td.nextElementSibling as HTMLTableCellElement)
             } else if (nextAction === 'edit-prev-cell' && td.previousElementSibling) {
               handleEditTableCell(td.previousElementSibling as HTMLTableCellElement)
+            } else if (nextAction === 'edit-bellow-cell') {
+              const tr = td.parentElement?.nextElementSibling
+              if (tr && tr.tagName === 'TR') {
+                const nextTd = tr.children[cellIndex] as HTMLTableCellElement
+                if (nextTd && (nextTd.tagName === 'TD' || nextTd.tagName === 'TH')) {
+                  handleEditTableCell(nextTd)
+                }
+              }
+            } else if (nextAction === 'edit-above-cell') {
+              const tr = td.parentElement?.previousElementSibling
+              if (tr && tr.tagName === 'TR') {
+                const nextTd = tr.children[cellIndex] as HTMLTableCellElement
+                if (nextTd && (nextTd.tagName === 'TD' || nextTd.tagName === 'TH')) {
+                  handleEditTableCell(nextTd)
+                }
+              }
             }
           }, 0)
         }
@@ -346,7 +371,7 @@ async function handleClick (e: MouseEvent, modal: boolean) {
   return false
 }
 
-function addRow (td: HTMLTableCellElement, offset: -1 | 1) {
+function addRow (td: HTMLTableCellElement, num: number) {
   const start = parseInt(td.dataset.sourceLine || '0')
   const end = parseInt(td.dataset.sourceLineEnd || '0')
 
@@ -362,11 +387,14 @@ function addRow (td: HTMLTableCellElement, offset: -1 | 1) {
 
   const refText = getLineContent(hr.start)
   const cols = escapedSplit(refText)
-  const columns = cols.map(() => ' -- ')
+  const columns = cols.map((str) => str.replace(/\S/g, '-'))
 
   const str = columnsToStr(columns, refText)
+
+  const strs = Array.from({ length: Math.abs(num) }, () => str).join('\n')
+
   const content = getLineContent(start)
-  const text = offset > 0 ? `${content}\n${str}` : `${str}\n${content}`
+  const text = num > 0 ? `${content}\n${strs}` : `${strs}\n${content}`
 
   replaceLine(start, text)
 }
@@ -395,6 +423,21 @@ function processColumns (td: HTMLTableCellElement, process: (columns: string[]) 
 
   const refText = getLineContent(hr.start)
 
+  const _editor = editor.getEditor()
+  const monaco = editor.getMonaco()
+
+  const _replaceLine = editWrapper((line: number, text: string) => {
+    const length = editor.getEditor().getModel()!.getLineLength(line)
+    _editor.executeEdits('', [
+      {
+        range: new (monaco.Range)(line, 1, line, length + 1),
+        text,
+        forceMoveMarkers: true
+      }
+    ])
+    _editor.setPosition(new monaco.Position(line, text.length + 1))
+  })
+
   rows.forEach((row) => {
     const { start } = row
 
@@ -403,8 +446,10 @@ function processColumns (td: HTMLTableCellElement, process: (columns: string[]) 
 
     process(columns)
 
-    replaceLine(start, columnsToStr(columns, refText))
+    _replaceLine(start, columnsToStr(columns, refText))
   })
+
+  _editor.focus()
 }
 
 function alignCol (td: HTMLTableCellElement, type: 'left' | 'center' | 'right' | 'normal') {
@@ -436,14 +481,17 @@ function alignCol (td: HTMLTableCellElement, type: 'left' | 'center' | 'right' |
   replaceLine(hr.start, columnsToStr(columns, content))
 }
 
-function addCol (td: HTMLTableCellElement, offset: 0 | 1) {
+function addCol (td: HTMLTableCellElement, num: number) {
+  const offset = num > 0 ? 1 : 0
   const cellIndex = getCellIndex(td)
+  const arr = Array.from({ length: Math.abs(num) }, () => ' -- ')
+
   processColumns(td, columns => {
     if (cellIndex > columns.length - 1 || cellIndex < 0) {
       return
     }
 
-    columns.splice(cellIndex + offset, 0, ' -- ')
+    columns.splice(cellIndex + offset, 0, ...arr)
   })
 }
 
@@ -591,10 +639,17 @@ function sortRows (td: HTMLTableCellElement, order: 'asc' | 'desc') {
   })
 }
 
+const insertNums = reactive({
+  colLeft: 1,
+  colRight: 1,
+  rowTop: 1,
+  rowBottom: 1,
+})
+
 export default {
   name: 'markdown-table',
   register: (ctx) => {
-    ctx.theme.addStyles(`
+    ctx.view.addStyles(`
       .markdown-view .markdown-body table.small td,
       .markdown-view .markdown-body table.small th {
         padding: 3px 6px;
@@ -626,8 +681,8 @@ export default {
         }
 
         .markdown-view .markdown-body .table-wrapper > table tr:hover {
-          outline: 2px #b3833b dashed;
-          outline-offset: -2px;
+          outline: 1px #b3833b dashed;
+          outline-offset: -1px;
         }
 
         .markdown-view .markdown-body .table-wrapper > table tbody {
@@ -667,6 +722,24 @@ export default {
         .markdown-view .markdown-body .table-wrapper > table[sort-mode] .sortable-ghost {
           opacity: 0.5;
         }
+      }
+    `)
+
+    ctx.theme.addStyles(`
+      .plugin-table-cell-edit-insert-nums {
+        display: flex;
+        align-items: center;
+      }
+
+      .plugin-table-cell-edit-insert-nums > input {
+        margin-left: 10px !important;
+        font-size: 12px !important;
+        padding: 0 2px !important;
+        width: 3em !important;
+        text-align: center !important;
+        background: rgba(var(--g-color-0-rgb), 0.1) !important;
+        margin-top: -4px !important;
+        margin-bottom: -4px !important;
       }
     `)
 
@@ -730,19 +803,36 @@ export default {
           throw new Error(msg)
         }
 
+        const buildInput = (key: keyof typeof insertNums) => ctx.lib.vue.h('input', {
+          value: insertNums[key],
+          type: 'number',
+          min: 1,
+          max: 99,
+          step: 1,
+          onInput: (e: any) => { insertNums[key] = e.target.value },
+          onClick: (e: any) => { e.stopPropagation() },
+          onKeyup: (e: any) => { if (e.keyCode === 13) { e.target.parentNode.click(); e.stopPropagation() } }
+        })
+
         const editRowMenu: Components.ContextMenu.Item[] = tagName === 'TD' ? [
           { type: 'separator' },
           {
             id: 'plugin.table.cell-edit.add-row-above',
             type: 'normal',
-            label: ctx.i18n.t('table-cell-edit.context-menu.add-row-above'),
-            onClick: () => addRow(target, -1),
+            label: ctx.lib.vue.h('span', { class: 'plugin-table-cell-edit-insert-nums' }, [
+              ctx.i18n.t('table-cell-edit.context-menu.add-row-above'),
+              buildInput('rowTop')
+            ]),
+            onClick: () => addRow(target, -(insertNums.rowTop || 1)),
           },
           {
             id: 'plugin.table.cell-edit.add-row-below',
             type: 'normal',
-            label: ctx.i18n.t('table-cell-edit.context-menu.add-row-below'),
-            onClick: () => addRow(target, 1)
+            label: ctx.lib.vue.h('span', { class: 'plugin-table-cell-edit-insert-nums' }, [
+              ctx.i18n.t('table-cell-edit.context-menu.add-row-below'),
+              buildInput('rowBottom')
+            ]),
+            onClick: () => addRow(target, insertNums.rowBottom || 1),
           },
           {
             id: 'plugin.table.cell-edit.delete-row',
@@ -766,6 +856,7 @@ export default {
             id: 'plugin.table.cell-edit.edit',
             type: 'normal' as any,
             label: ctx.i18n.t('table-cell-edit.context-menu.edit'),
+            ellipsis: true,
             onClick: () => {
               handleClick(e, true)
             }
@@ -829,14 +920,20 @@ export default {
           {
             id: 'plugin.table.cell-edit.add-col-left',
             type: 'normal',
-            label: ctx.i18n.t('table-cell-edit.context-menu.add-col-left'),
-            onClick: () => addCol(target, 0)
+            label: ctx.lib.vue.h('span', { class: 'plugin-table-cell-edit-insert-nums' }, [
+              ctx.i18n.t('table-cell-edit.context-menu.add-col-left'),
+              buildInput('colLeft')
+            ]),
+            onClick: () => addCol(target, -(insertNums.colLeft || 1))
           },
           {
             id: 'plugin.table.cell-edit.add-col-right',
             type: 'normal',
-            label: ctx.i18n.t('table-cell-edit.context-menu.add-col-right'),
-            onClick: () => addCol(target, 1)
+            label: ctx.lib.vue.h('span', { class: 'plugin-table-cell-edit-insert-nums' }, [
+              ctx.i18n.t('table-cell-edit.context-menu.add-col-right'),
+              buildInput('colRight')
+            ]),
+            onClick: () => addCol(target, insertNums.colRight || 1)
           },
           {
             id: 'plugin.table.cell-edit.delete-col',

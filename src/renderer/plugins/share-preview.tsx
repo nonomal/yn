@@ -6,9 +6,9 @@ export default {
   register: (ctx) => {
     ctx.registerHook('STARTUP', () => {
       if (ctx.args.MODE === 'share-preview') {
-        ctx.store.watch(state => state.presentation, val => {
+        ctx.store.watch(() => ctx.store.state.presentation, val => {
           if (!val) {
-            ctx.store.commit('setPresentation', true)
+            ctx.store.state.presentation = true
           }
         }, { immediate: true })
       }
@@ -91,10 +91,13 @@ export default {
       await ctx.utils.sleep(100)
 
       if (ctx.setting.getSetting('server.host') !== '0.0.0.0') {
-        ctx.ui.useModal().alert({
+        await ctx.ui.useModal().alert({
           title: ctx.i18n.t('status-bar.tool.share-preview'),
           content: ctx.i18n.t('share-preview.tips')
         })
+
+        ctx.setting.showSettingPanel('server.host')
+
         return
       }
 
@@ -117,6 +120,8 @@ export default {
           id: 'plugin.share-preview',
           type: 'normal',
           title: ctx.i18n.t('status-bar.tool.share-preview'),
+          ellipsis: true,
+          hidden: ctx.view.getRenderEnv()?.safeMode,
           onClick: () => showOptionsPanel()
         },
       )

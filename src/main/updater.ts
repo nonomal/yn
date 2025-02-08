@@ -1,14 +1,20 @@
+import type { RequestOptions } from 'http'
 import { dialog, app, shell } from 'electron'
-import { autoUpdater, CancellationToken, Provider } from 'electron-updater'
+import { dirname } from 'path'
+import { readdirSync } from 'fs'
+import { autoUpdater, CancellationToken, UpdateInfo } from 'electron-updater'
+import { resolveFiles } from 'electron-updater/out/providers/Provider'
+import { GitHubProvider } from 'electron-updater/out/providers/GitHubProvider'
 import logger from 'electron-log'
 import ProgressBar from 'electron-progressbar'
+import { HOMEPAGE_URL } from '../share/misc'
 import store from './storage'
 import { GITHUB_URL } from './constant'
 import { $t } from './i18n'
 import { registerAction } from './action'
 import config from './config'
 
-type Source = 'github.com' | 'ghproxy.com' | 'mirror.ghproxy.com'
+type Source = 'auto' | 'github' | 'yank-note'
 
 logger.transports.file.level = 'info'
 autoUpdater.logger = logger
@@ -16,54 +22,84 @@ autoUpdater.logger = logger
 let progressBar: any = null
 
 const isAppx = app.getAppPath().indexOf('\\WindowsApps\\') > -1
-const disabled = isAppx || process.mas
+let disabled = isAppx || (process as any).mas
 
-const httpRequest = (Provider.prototype as any).httpRequest
-;(Provider.prototype as any).httpRequest = function (url: URL, headers: Record<string, string>, ...args: any[]) {
-  const source: Source = config.get('updater.source', 'github.com')
+class UpdateProvider extends GitHubProvider {
+  constructor (options: any, updater: any, runtimeOptions: any) {
+    super(options, updater, runtimeOptions)
 
-  if (source !== 'github.com') {
-    headers['user-agent'] = 'curl/7.77.0'
-    console.log('updater httpRequest', url.href)
+    const request = this.executor.request.bind(this.executor)
+    this.executor.request = (options: RequestOptions, ...args: any[]) => {
+      if (!this.isGithub()) {
+        const _url = new URL(HOMEPAGE_URL)
+        if (options.path === '/purocean/yn/releases.atom') {
+          options.hostname = _url.hostname
+          options.path = '/api/update-info/releases.atom'
+        } else if (options.path === '/purocean/yn/releases/latest') {
+          options.hostname = _url.hostname
+          options.path = '/api/update-info/latest'
+        } else if (options.path?.startsWith('/purocean/yn/releases/download')) {
+          options.hostname = _url.hostname
+          options.path = options.path.replace(/\/purocean\/yn\/releases\/download\/v[^/]+\//, '/download/')
+        }
 
-    if (url.pathname.endsWith('.atom')) {
-      url.host = 'github.com'
-      url.pathname = url.pathname.replace('/https://github.com', '')
+        console.log('request', options.protocol + '//' + options.hostname + options.path)
+      }
+
+      return request(options, ...args)
     }
   }
 
-  return httpRequest.call(this, url, headers, ...args)
-}
+  private getSource (): Exclude<Source, 'auto'> {
+    let source: Source = config.get('updater.source', 'auto')
 
-const setFeedURL = autoUpdater.setFeedURL
-autoUpdater.setFeedURL = async function (options: any) {
-  setFeedURL.call(this, options)
-  const source: Source = config.get('updater.source', 'github.com')
-  const provider = await (this as any).clientPromise
-  Object.defineProperty(provider, 'baseUrl', {
-    get () {
-      return new URL(`https://${source}/`)
+    if (source !== 'github' && source !== 'yank-note') {
+      source = 'auto'
     }
-  })
-  Object.defineProperty(provider, 'basePath', {
-    get () {
-      const basePath = `/${this.options.owner}/${this.options.repo}/releases`
 
-      if (source.includes('ghproxy')) {
-        return `/https://github.com${basePath}`
+    if (source === 'auto') {
+      if (app.getLocale().toLowerCase().includes('zh-cn')) {
+        source = 'yank-note'
+      } else {
+        source = 'github'
       }
+    }
 
-      return basePath
-    },
-  })
+    return source
+  }
+
+  private isGithub () {
+    return this.getSource() === 'github'
+  }
+
+  resolveFiles (updateInfo: UpdateInfo): ReturnType<GitHubProvider['resolveFiles']> {
+    if (this.isGithub()) {
+      return super.resolveFiles(updateInfo as any)
+    }
+
+    const baseUrl = new URL(HOMEPAGE_URL)
+
+    // still replace space to - due to backward compatibility
+    return resolveFiles(updateInfo, baseUrl, p => '/download/' + p.replace(/ /g, '-'))
+  }
 }
 
-const init = (call: () => void) => {
+const init = (call?: () => void) => {
   if (disabled) {
     return
   }
 
-  autoUpdater.setFeedURL({ provider: 'github', owner: 'purocean', repo: 'yn' })
+  if (process.platform === 'win32') {
+    const fileList = readdirSync(dirname(app.getPath('exe')))
+    const hasUninstall = fileList.some(x => x.includes('Uninstall'))
+    if (!hasUninstall) {
+      disabled = true
+      console.log('updater >', 'No uninstaller found, updater disabled')
+      return
+    }
+  }
+
+  autoUpdater.setFeedURL({ provider: 'custom', owner: 'purocean', repo: 'yn', updateProvider: UpdateProvider as any })
   autoUpdater.autoDownload = false
 
   autoUpdater.on('update-available', async info => {
@@ -75,12 +111,13 @@ const init = (call: () => void) => {
       buttons: [
         $t('app.updater.found-dialog.buttons.download'),
         $t('app.updater.found-dialog.buttons.view-changes'),
+        $t('app.updater.found-dialog.buttons.download-and-view-changes'),
         $t('app.updater.found-dialog.buttons.cancel'),
         $t('app.updater.found-dialog.buttons.ignore')
       ],
     })
 
-    if (response === 0) {
+    if (response === 0 || response === 2) {
       progressBar = new ProgressBar({
         title: $t('app.updater.progress-bar.title'),
         text: `${info.version}`,
@@ -111,9 +148,13 @@ const init = (call: () => void) => {
         console.log('cancel download')
         cancellationToken.cancel()
       })
-    } else if (response === 1) {
+    }
+
+    if (response === 1 || response === 2) {
       shell.openExternal(GITHUB_URL + '/releases')
-    } else if (response === 3) {
+    }
+
+    if (response === 4) {
       store.set('dontCheckUpdates', true)
     }
   })
@@ -150,7 +191,7 @@ const init = (call: () => void) => {
       if (result.response === 0) {
         setTimeout(() => {
           autoUpdater.quitAndInstall()
-          call()
+          call?.()
         }, 500)
       }
     })
@@ -192,7 +233,7 @@ app.whenReady().then(() => {
   init(() => {
     setTimeout(() => {
       app.exit(0)
-    }, process.platform === 'darwin' ? 3500 : 0)
+    }, process.platform === 'darwin' ? 8000 : 0)
   })
 
   setTimeout(() => {

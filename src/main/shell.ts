@@ -8,12 +8,12 @@ const CD_COMMAND_PREFIX = '--yank-note-run-command-cd--'
 const defaultShell = os.platform() === 'win32' ? 'cmd.exe' : (process.env.SHELL || 'bash')
 
 const getShell = () => {
-  const shell = config.get(configKey, defaultShell)
+  const shell = (config.get(configKey, defaultShell) || '').trim() || defaultShell
 
   // use full path
   // TODO better way.
   if (os.platform() === 'win32') {
-    if (shell.toLocaleLowerCase() === 'cmd.exe' || shell.toLocaleLowerCase() === 'wsl.exe') {
+    if (shell.toLowerCase() === 'cmd.exe' || shell.toLowerCase() === 'wsl.exe') {
       return `C:\\Windows\\System32\\${shell}`
     }
   }

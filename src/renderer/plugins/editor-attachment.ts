@@ -2,9 +2,8 @@ import dayjs from 'dayjs'
 import { insert, whenEditorReady } from '@fe/services/editor'
 import type { Plugin } from '@fe/context'
 import type { Doc } from '@fe/types'
-import { encodeMarkdownLink } from '@fe/utils'
+import { encodeMarkdownLink, escapeMd } from '@fe/utils'
 import { basename, dirname, isBelongTo, join, normalizeSep, relative } from '@fe/utils/path'
-import { getActionHandler } from '@fe/core/action'
 import store from '@fe/support/store'
 import * as api from '@fe/support/api'
 import { refreshTree } from '@fe/services/tree'
@@ -25,7 +24,7 @@ async function uploadFile (file: any, asImage: boolean) {
   if (asImage) {
     insert(`![Img](${encodeMarkdownLink(assetPath)})\n`)
   } else {
-    insert(`[${dayjs().format('YYYY-MM-DD HH:mm')}] [${file.name} (${(file.size / 1024).toFixed(2)}KiB)](${encodeMarkdownLink(assetPath)}){.${DOM_CLASS_NAME.MARK_OPEN}}\n`)
+    insert(`[${dayjs().format('YYYY-MM-DD HH:mm')}] [${escapeMd(file.name)} (${(file.size / 1024).toFixed(2)}KiB)](${encodeMarkdownLink(assetPath)}){.${DOM_CLASS_NAME.MARK_OPEN}}\n`)
   }
 
   refreshTree()
@@ -48,12 +47,14 @@ async function linkFile () {
   const useList = filePaths.length > 1
   for (let path of filePaths) {
     path = normalizeSep(path)
-    const filename = basename(path).replace(/[[\]]/g, '')
-    insert(`${useList ? '- ' : ''}[${filename}](file://${encodeMarkdownLink(path)})\n`)
+    const filename = basename(path)
+    insert(`${useList ? '- ' : ''}[${escapeMd(filename)}](file://${encodeMarkdownLink(path)})\n`)
   }
 }
 
-function addDocument (doc: Doc) {
+function addDocument (doc?: Doc | null) {
+  if (!doc) return
+
   const file = store.state.currentFile
   if (file) {
     if (!isSameRepo(file, doc)) {
@@ -75,9 +76,14 @@ function addDocument (doc: Doc) {
 export default {
   name: 'editor-attachment',
   register: (ctx) => {
+    const idAddImage = 'plugin.editor.add-image'
+    const idAddFile = 'plugin.editor.add-file'
+    const idLinkDoc = 'plugin.editor.link-doc'
+    const idLinkFile = 'plugin.editor.link-file'
+
     whenEditorReady().then(({ editor, monaco }) => {
       editor.addAction({
-        id: 'plugin.editor.add-image',
+        id: idAddImage,
         contextMenuGroupId: 'modification',
         label: t('add-image'),
         keybindings: [
@@ -86,7 +92,7 @@ export default {
         run: () => addAttachment(true),
       })
       editor.addAction({
-        id: 'plugin.editor.add-file',
+        id: idAddFile,
         contextMenuGroupId: 'modification',
         label: t('editor.context-menu.add-attachment'),
         keybindings: [
@@ -95,16 +101,16 @@ export default {
         run: () => addAttachment(false),
       })
       editor.addAction({
-        id: 'plugin.editor.link-doc',
+        id: idLinkDoc,
         contextMenuGroupId: 'modification',
         label: t('editor.context-menu.link-doc'),
         keybindings: [
           monaco.KeyMod.Alt | monaco.KeyCode.KeyD
         ],
-        run: () => getActionHandler('filter.choose-document')().then(addDocument),
+        run: () => ctx.routines.chooseDocument().then(addDocument),
       })
       editor.addAction({
-        id: 'plugin.editor.link-file',
+        id: idLinkFile,
         contextMenuGroupId: 'modification',
         label: t('editor.context-menu.link-file'),
         keybindings: [
@@ -117,31 +123,35 @@ export default {
     ctx.statusBar.tapMenus(menus => {
       menus['status-bar-insert']?.list?.push(
         {
-          id: 'plugin.editor.add-image',
+          id: idAddImage,
           type: 'normal',
           title: ctx.i18n.t('add-image'),
-          subTitle: ctx.command.getKeysLabel([ctx.command.Alt, 'i']),
+          subTitle: ctx.keybinding.getKeysLabel(ctx.editor.lookupKeybindingKeys(idAddImage) || []),
+          ellipsis: true,
           onClick: () => addAttachment(true),
         },
         {
-          id: 'plugin.editor.add-file',
+          id: idAddFile,
           type: 'normal',
           title: ctx.i18n.t('editor.context-menu.add-attachment'),
-          subTitle: ctx.command.getKeysLabel([ctx.command.Alt, 'f']),
+          subTitle: ctx.keybinding.getKeysLabel(ctx.editor.lookupKeybindingKeys(idAddFile) || []),
+          ellipsis: true,
           onClick: () => addAttachment(false),
         },
         {
-          id: 'plugin.editor.link-doc',
+          id: idLinkDoc,
           type: 'normal',
           title: ctx.i18n.t('editor.context-menu.link-doc'),
-          subTitle: ctx.command.getKeysLabel([ctx.command.Alt, 'd']),
-          onClick: () => getActionHandler('filter.choose-document')().then(addDocument),
+          subTitle: ctx.keybinding.getKeysLabel(ctx.editor.lookupKeybindingKeys(idLinkDoc) || []),
+          ellipsis: true,
+          onClick: () => ctx.routines.chooseDocument().then(addDocument),
         },
         {
-          id: 'plugin.editor.link-file',
+          id: idLinkFile,
           type: 'normal',
           title: ctx.i18n.t('editor.context-menu.link-file'),
-          subTitle: ctx.command.getKeysLabel([ctx.command.Alt, ctx.command.Shift, 'f']),
+          subTitle: ctx.keybinding.getKeysLabel(ctx.editor.lookupKeybindingKeys(idLinkFile) || []),
+          ellipsis: true,
           onClick: () => linkFile(),
         },
         { type: 'separator' },

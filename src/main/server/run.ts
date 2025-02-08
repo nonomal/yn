@@ -17,17 +17,38 @@ function execFile (file: string, args: string[], options?: cp.ExecFileOptions) {
     })
 
     process.on('spawn', () => {
-      const output = [process.stdout, process.stderr].filter(Boolean) as NodeJS.ReadableStream[]
-      resolve(mergeStreams(output))
+      const output = mergeStreams([process.stdout, process.stderr].filter(Boolean) as NodeJS.ReadableStream[])
+
+      output.on('close', () => {
+        console.log('execFile process closed')
+        process.kill()
+      })
+
+      resolve(output)
     })
   })
 }
 
 function execCmd (cmd: string, options?: cp.ExecOptions, onComplete?: () => void) {
-  const process = cp.exec(cmd, { timeout: 300 * 1000, ...options })
-  onComplete && process.on('close', onComplete)
-  const output = [process.stdout, process.stderr].filter(Boolean) as NodeJS.ReadableStream[]
-  return mergeStreams(output)
+  return new Promise<string | NodeJS.ReadableStream>((resolve) => {
+    const process = cp.exec(cmd, { timeout: 300 * 1000, ...options })
+
+    process.on('error', error => {
+      resolve(error.message)
+    })
+
+    process.on('spawn', () => {
+      const output = mergeStreams([process.stdout, process.stderr].filter(Boolean) as NodeJS.ReadableStream[])
+
+      output.on('close', () => {
+        console.log('execCmd process closed')
+        onComplete && onComplete()
+        process.kill()
+      })
+
+      resolve(output)
+    })
+  })
 }
 
 const runCode = async (cmd: { cmd: string, args: string[] } | string, code: string): Promise<string | NodeJS.ReadableStream> => {
@@ -73,10 +94,20 @@ const runCode = async (cmd: { cmd: string, args: string[] } | string, code: stri
         return execFile('wsl.exe', [...args, '--', cmd.cmd].concat(cmd.args).concat([code]))
       }
 
-      if (!isWin) {
+      if (isWin) {
+        if (!env.PYTHONIOENCODING) {
+          // use utf-8 encoding for python on windows
+          env.PYTHONIOENCODING = 'utf-8'
+        }
+      } else {
         const extPath = '/usr/local/bin'
         if (env.PATH && env.PATH.indexOf(extPath) < 0) {
           env.PATH = `${extPath}:${env.PATH}`
+        }
+
+        if (!env.LANG && !env.LC_ALL) {
+          env.LANG = 'en_US.UTF-8'
+          env.LC_ALL = 'en_US.UTF-8'
         }
       }
 

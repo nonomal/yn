@@ -50,7 +50,6 @@ Yank Note has some concepts that are the basis for supporting the entire plug-in
 
 1. Hook
 1. Action
-1. Command
 
 ### Hook
 
@@ -82,9 +81,6 @@ Yank Note has an Action Center [`ctx.action`](https://yn-api-doc.vercel.app/modu
 
 For internal action, please refer to [Api Document](https://yn-api-doc.vercel.app/modules/renderer_types.html#BuildInActions)
 
-### Command
-Yank Note has a Command Center [`ctx.command`](https://yn-api-doc.vercel.app/modules/renderer_core_command.html), which is mainly responsible for the management and operation of shortcut keys.
-
 ## Plug-In Capabilities
 
 As you can see from the above, the functions of the plug-in are all implemented through the modules of `ctx`.
@@ -94,7 +90,7 @@ In addition to the above core modules, there are many other modules under ctx, w
 Run the following code, you can see which modules are available of `ctx`.
 
 ```js
-// --run--
+// --run-- --no-worker--
 console.log(Object.keys(ctx).join('\n'))
 ```
 
@@ -113,7 +109,7 @@ In addition, if you only need to create some handy tools, you don't need to writ
 For example, run js code:
 
 ```js
-// --run--
+// --run-- --no-worker--
 ctx.ui.useToast().show("info", "HELLOWORLD!")
 console.log("hello world!")
 ```

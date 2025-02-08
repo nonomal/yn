@@ -1,10 +1,12 @@
 import { nextTick } from 'vue'
 import { throttle } from 'lodash-es'
-import store from '@fe/support/store'
 import { triggerHook } from '@fe/core/hook'
 import { getActionHandler, registerAction } from '@fe/core/action'
-import { Alt } from '@fe/core/command'
+import { Alt } from '@fe/core/keybinding'
+import store from '@fe/support/store'
 import * as view from './view'
+import { t } from './i18n'
+import { getEditor } from './editor'
 
 const emitResizeDebounce = throttle(() => {
   triggerHook('GLOBAL_RESIZE')
@@ -22,7 +24,7 @@ export function emitResize () {
  * @param visible
  */
 export function toggleSide (visible?: boolean) {
-  store.commit('setShowSide', typeof visible === 'boolean' ? visible : !store.state.showSide)
+  store.state.showSide = typeof visible === 'boolean' ? visible : !store.state.showSide
   emitResize()
 }
 
@@ -32,10 +34,16 @@ export function toggleSide (visible?: boolean) {
  */
 export function toggleView (visible?: boolean) {
   const val = typeof visible === 'boolean' ? visible : !store.state.showView
-  val && nextTick(view.refresh)
+  val && nextTick(view.render)
 
-  store.commit('setShowView', val)
-  store.commit('setShowEditor', true)
+  store.state.showView = val
+
+  if (store.state.editorPreviewExclusive && store.state.showEditor) {
+    store.state.showEditor = false
+  } else {
+    store.state.showEditor = true
+  }
+
   emitResize()
 }
 
@@ -44,8 +52,21 @@ export function toggleView (visible?: boolean) {
  * @param visible
  */
 export function toggleEditor (visible?: boolean) {
-  store.commit('setShowView', true)
-  store.commit('setShowEditor', typeof visible === 'boolean' ? visible : !store.state.showEditor)
+  const val = typeof visible === 'boolean' ? visible : !store.state.showEditor
+  store.state.showEditor = val
+
+  if (store.state.editorPreviewExclusive && store.state.showView) {
+    store.state.showView = false
+  } else {
+    store.state.showView = true
+  }
+
+  if (val) {
+    Promise.resolve().then(() => {
+      getEditor().focus()
+    })
+  }
+
   emitResize()
 }
 
@@ -57,7 +78,7 @@ export function toggleXterm (visible?: boolean) {
   const showXterm = store.state.showXterm
   const show = typeof visible === 'boolean' ? visible : !showXterm
 
-  store.commit('setShowXterm', show)
+  store.state.showXterm = show
 
   nextTick(() => {
     emitResize()
@@ -67,15 +88,51 @@ export function toggleXterm (visible?: boolean) {
     }
   })
 }
+
 /**
- * Toggle outline visible.
- * @param visible
+ * Toggle editor preview exclusive.
+ * @param exclusive
  */
-export function toggleOutline (visible?: boolean) {
-  store.commit('setShowOutline', typeof visible === 'boolean' ? visible : !store.state.showOutline)
+export function toggleEditorPreviewExclusive (exclusive?: boolean) {
+  const val = typeof exclusive === 'boolean' ? exclusive : !store.state.editorPreviewExclusive
+
+  store.state.editorPreviewExclusive = val
+
+  if (val && store.state.showEditor && store.state.showView) {
+    store.state.showView = false
+  }
+
+  emitResize()
 }
 
-registerAction({ name: 'layout.toggle-side', handler: toggleSide, keys: [Alt, 'e'] })
-registerAction({ name: 'layout.toggle-editor', handler: toggleEditor, keys: [Alt, 'x'] })
-registerAction({ name: 'layout.toggle-view', handler: toggleView, keys: [Alt, 'v'] })
-registerAction({ name: 'layout.toggle-xterm', handler: toggleXterm, keys: [Alt, 't'] })
+registerAction({
+  name: 'layout.toggle-side',
+  description: t('command-desc.layout_toggle-side'),
+  handler: toggleSide,
+  forUser: true,
+  keys: [Alt, 'e']
+})
+
+registerAction({
+  name: 'layout.toggle-editor',
+  description: t('command-desc.layout_toggle-editor'),
+  handler: toggleEditor,
+  forUser: true,
+  keys: [Alt, 'x']
+})
+
+registerAction({
+  name: 'layout.toggle-view',
+  description: t('command-desc.layout_toggle-view'),
+  handler: toggleView,
+  forUser: true,
+  keys: [Alt, 'v']
+})
+
+registerAction({
+  name: 'layout.toggle-xterm',
+  description: t('command-desc.layout_toggle-xterm'),
+  handler: toggleXterm,
+  forUser: true,
+  keys: [Alt, 't']
+})

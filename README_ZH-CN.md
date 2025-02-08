@@ -1,10 +1,10 @@
 # Yank Note
 
-一款面向程序员的 Markdown 笔记应用 **[全平台下载](https://github.com/purocean/yn/releases)** ｜ **[在线体验>>>](https://yank-note.vercel.app/)**
+一款**强大可扩展**的 Markdown 编辑器，为生产力而生。**[全平台下载](https://github.com/purocean/yn/releases)** ｜ **[在线体验>>>](https://demo.yank-note.com/)**
 
 [![Download](./help/mas_en.svg?.inline)](https://apps.apple.com/cn/app/yank-note/id1551528618) [Mac App Store 版本说明](https://github.com/purocean/yn/issues/65#issuecomment-1065799677)
 
-[English](./README.md) | 中文说明
+[English](./README.md) | 中文说明 | [Русский](./README_RU.md)
 
 [toc]{level: [2]}
 
@@ -39,7 +39,7 @@
 - **待办列表:** 支持显示文档中的待办进度，点击可快速切换待办状态
 - **快速打开:** 可使用快捷键打开文件切换面板，以便快捷打开文件，标记的文件，全文搜索文件内容
 - **内置终端:** 支持在编辑器打开终端，快速切换当前工作目录
-- **公式解析:** 支持输入 katex 公式代码
+- **公式解析:** 支持输入 LaTeX 公式代码
 - **样式风格:** Markdown 使用 GitHub 风格样式和特性
 - **数据仓库:** 可定义多个数据位置以便文档分类
 - **外链转换:** 将外链或 BASE64 图片转换为本地图片
@@ -76,11 +76,11 @@
 
 ## 更新日志
 
-### [v3.36.1](https://github.com/purocean/yn/releases/tag/v3.36.1) 2022-09-16
+### [v3.81.3](https://github.com/purocean/yn/releases/tag/v3.81.3) 2025-02-06
 
-1. feat: 支持在应用内部打开包含 `__allow-open-window__` 的链接
-2. fix: 修复暗色主题样式
-3. fix: 修复大纲标题聚焦问题
+[Windows](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-win-x64-3.81.3.exe) | [macOS arm64](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-mac-arm64-3.81.3.dmg) | [macOS x64](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-mac-x64-3.81.3.dmg) | [Linux AppImage](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-linux-x86_64-3.81.3.AppImage) | [Linux deb](https://github.com/purocean/yn/releases/download/v3.81.3/Yank-Note-linux-amd64-3.81.3.deb)
+
+1. fix: 修复 Windows 上可能删除目录失败问题
 
 [更多发布说明](https://github.com/purocean/yn/releases)
 

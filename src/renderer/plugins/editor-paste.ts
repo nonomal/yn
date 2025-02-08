@@ -1,5 +1,6 @@
 import dayjs from 'dayjs'
 import TurndownService from 'turndown'
+import { gfm } from 'joplin-turndown-plugin-gfm'
 import { getEditor, insert } from '@fe/services/editor'
 import { Plugin } from '@fe/context'
 import { triggerHook } from '@fe/core/hook'
@@ -7,13 +8,15 @@ import { refreshTree } from '@fe/services/tree'
 import { upload } from '@fe/services/base'
 import store from '@fe/support/store'
 import { encodeMarkdownLink, fileToBase64URL, path } from '@fe/utils'
-import { isKeydown } from '@fe/core/command'
+import { isKeydown } from '@fe/core/keybinding'
 
-const IMAGE_REG = /^image\/(png|jpg|jpeg|gif)$/i
+const IMAGE_REG = /^image\//i
 const HTML_REG = /^text\/html$/i
 
 async function pasteHtml (html: string) {
-  const md = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '+' }).turndown(html)
+  const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '+' })
+  td.use(gfm)
+  const md = td.turndown(html)
   insert(md + '\n')
 }
 
@@ -40,12 +43,20 @@ async function pasteImage (file: File, asBase64: boolean) {
   }
 }
 
+let selectedTextBeforePaste = ''
+
 function paste (e: ClipboardEvent) {
-  if (!getEditor().hasTextFocus()) {
+  selectedTextBeforePaste = ''
+  const editor = getEditor()
+  if (!editor.hasTextFocus()) {
     return
   }
 
-  const items = e.clipboardData!.items
+  if (e.clipboardData === null) {
+    return
+  }
+
+  const items = e.clipboardData.items
   if (isKeydown('D')) { // covert RFT to markdown
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.match(HTML_REG)) {
@@ -58,10 +69,21 @@ function paste (e: ClipboardEvent) {
   } else {
     for (let i = 0; i < items.length; i++) {
       const fileType = items[i].type
-      if (fileType.match(IMAGE_REG)) {
+      if (IMAGE_REG.test(fileType)) {
+        e.preventDefault()
+        e.stopPropagation()
         const asBase64 = isKeydown('B') // press key b, paste image as base64
         pasteImage(items[i].getAsFile()!, asBase64)
       }
+    }
+  }
+
+  // normal paste
+  // only one selection
+  if (editor.getSelections()?.length === 1) {
+    const selection = editor.getSelection()
+    if (selection && !selection.isEmpty()) {
+      selectedTextBeforePaste = editor.getModel()?.getValueInRange(selection) || ''
     }
   }
 }
@@ -76,9 +98,9 @@ export default {
 
     const pasteImageFromClipboard = async (asBase64: boolean) => {
       ctx.base.readFromClipboard(async (type, getType) => {
-        const match = type.match(IMAGE_REG)
-        if (match) {
-          const file = new File([await getType(type)], 'image.' + match[1], { type })
+        if (IMAGE_REG.test(type)) {
+          const ext = ctx.lib.mime.getExtension(type)
+          const file = new File([await getType(type)], 'image.' + ext, { type })
           await pasteImage(file, asBase64)
           const { editor } = await ctx.editor.whenEditorReady()
           editor.focus()
@@ -146,6 +168,77 @@ export default {
         contextMenuGroupId: 'clipboard',
         contextMenuOrder: 3,
         run: pasteRtf,
+      })
+
+      editor.onDidPaste(({ range }) => {
+        const model = editor.getModel()
+        const languageId = model?.getLanguageId()
+        const parsedText = model?.getValueInRange(range) || ''
+
+        // paste link as markdown link
+        if (selectedTextBeforePaste && languageId === 'markdown' && !selectedTextBeforePaste.includes('\n')) {
+          const isLink = (str: string) => {
+            if (!/^https?:\/\//i.test(str)) {
+              return false
+            }
+
+            try {
+              // eslint-disable-next-line no-new
+              new URL(str)
+              return true
+            } catch (_) {
+              return false
+            }
+          }
+
+          const parsedTextIsLink = isLink(parsedText)
+          const selectedTextBeforePasteIsLink = isLink(selectedTextBeforePaste)
+
+          // both are link, do nothing
+          if (parsedTextIsLink && selectedTextBeforePasteIsLink) {
+            return
+          }
+
+          // is link
+          if (parsedText && parsedTextIsLink) {
+            const text = `[${
+              selectedTextBeforePaste.replace(/([[\]])/g, '\\$1')
+            }](${encodeMarkdownLink(parsedText)})`
+            editor.executeEdits('paste', [{ range, text }])
+            return
+          } else if (selectedTextBeforePasteIsLink) {
+            const text = `[${
+              parsedText.replace(/([[\]])/g, '\\$1').trim()
+            }](${encodeMarkdownLink(selectedTextBeforePaste)})`
+            editor.executeEdits('paste', [{ range, text }])
+            return
+          }
+        }
+
+        // paste splitted by tab as table
+        if (languageId === 'markdown') {
+          const lines = parsedText.replace(/^\n+|\n+$/g, '').split('\n')
+          if (lines.length > 2) {
+            let rows = []
+            for (const line of lines) {
+              const columns = line.split('\t')
+              if (columns.length >= 2) {
+                rows.push(`| ${columns.join(' | ')} |`)
+              } else {
+                rows = []
+                break
+              }
+            }
+
+            if (rows.length > 1) {
+              // add header
+              rows.splice(1, 0, rows[0].replace(/[^|]+/g, ' -- '))
+              editor.executeEdits('paste', [{ range, text: rows.join('\n') }])
+            }
+          }
+        }
+
+        selectedTextBeforePaste = ''
       })
     })
   }

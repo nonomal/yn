@@ -6,14 +6,17 @@
     <div class="main">
       <div class="left" ref="aside" v-show="showSide">
         <slot name="left"></slot>
-        <div class="sash-right" @dblclick="resetSize('right', 'aside')" @mousedown="e => initResize('right', 'aside', 100, 700, e)"></div>
+        <div class="sash-right" @dblclick="resetSize('right', 'aside')" @mousedown="e => initResize('right', 'aside', 130, 700, e)"></div>
       </div>
       <div class="right">
+        <div class="right-before">
+          <slot name="right-before" />
+        </div>
         <div class="content" ref="content">
           <div class="editor" ref="editor" v-show="showEditor">
             <slot name="editor"></slot>
           </div>
-          <div class="preview" v-show="showView">
+          <div :class="{preview: true, 'preview-hidden': !presentation && !showView}">
             <div v-if="showView && showEditor" class="sash-left" @dblclick="resetSize('right', 'editor')" @mousedown="initEditorResize"></div>
             <slot name="preview"></slot>
           </div>
@@ -32,20 +35,17 @@
 
 <script lang="ts">
 import { defineComponent, onBeforeUnmount, onMounted, ref, toRefs, watchPostEffect } from 'vue'
-import { useStore } from 'vuex'
 import { $args, FLAG_DISABLE_XTERM } from '@fe/support/args'
 import { emitResize, toggleEditor, toggleSide, toggleView, toggleXterm } from '@fe/services/layout'
 import { isElectron } from '@fe/support/env'
-import type { AppState } from '@fe/support/store'
+import store from '@fe/support/store'
 
 let resizeOrigin: any = null
 
 export default defineComponent({
   name: 'layout',
   setup () {
-    const store = useStore()
-
-    const { showView, showXterm, showSide, showEditor, presentation, isFullscreen } = toRefs<AppState>(store.state)
+    const { showView, showXterm, showSide, showEditor, presentation, isFullscreen } = toRefs(store.state)
 
     const aside = ref<HTMLElement | null>(null)
     const editor = ref<HTMLElement | null>(null)
@@ -77,14 +77,21 @@ export default defineComponent({
       return false
     }
 
+    function getContainerSibling (ref: HTMLElement, resizeOrigin: any): HTMLElement | null {
+      return (resizeOrigin.type === 'right'
+        ? ref.nextElementSibling
+        : ref.previousElementSibling) as HTMLElement | null
+    }
+
     function clearResize () {
       if (resizeOrigin) {
         const ref = refs[resizeOrigin.ref].value
         ref.style.filter = ''
         ref.style.pointerEvents = ''
-        const nextContainer = ref.nextElementSibling as HTMLElement
-        if (nextContainer) {
-          nextContainer.style.pointerEvents = ''
+
+        const sibling = getContainerSibling(ref, resizeOrigin)
+        if (sibling) {
+          sibling.style.pointerEvents = ''
         }
 
         resizeOrigin = null
@@ -114,10 +121,10 @@ export default defineComponent({
       }
 
       // prevent pointer events when mouse in container range
-      const nextContainer: HTMLElement = ref.nextElementSibling as HTMLElement
-      if (nextContainer) {
+      const sibling = getContainerSibling(ref, resizeOrigin)
+      if (sibling) {
         ref.style.pointerEvents = 'none'
-        nextContainer.style.pointerEvents = 'none'
+        sibling.style.pointerEvents = 'none'
       }
 
       if (resizeOrigin.type === 'right') {
@@ -259,6 +266,7 @@ export default defineComponent({
   &.presentation {
     .terminal,
     .left,
+    .right-before,
     .editor,
     .header,
     .footer {
@@ -324,7 +332,7 @@ export default defineComponent({
   z-index: 11;
   height: 100%;
   position: absolute;
-  right: 0;
+  right: -2px;
   top: 0;
   width: 4px;
   cursor: ew-resize;
@@ -348,6 +356,11 @@ export default defineComponent({
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+.right-before {
+  flex: none;
 }
 
 .content {
@@ -379,6 +392,12 @@ export default defineComponent({
   min-width: 0;
   box-sizing: border-box;
   position: relative;
+
+  &.preview-hidden {
+    visibility: hidden;
+    width: 0;
+    flex: none;
+  }
 }
 
 .footer {

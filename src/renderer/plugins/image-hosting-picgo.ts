@@ -1,3 +1,4 @@
+import type Token from 'markdown-it/lib/token'
 import { Plugin, Ctx } from '@fe/context'
 import { DOM_ATTR_NAME, FLAG_DEMO } from '@fe/support/args'
 
@@ -14,11 +15,10 @@ export default {
         title: 'T_picgo.setting.api-title',
         description: 'T_picgo.setting.api-desc',
         type: 'string',
-        defaultValue: '',
+        defaultValue: 'http://127.0.0.1:36677/upload',
         pattern: '^(http://|https://|$)',
         options: {
           patternmessage: 'T_picgo.setting.api-msg',
-          inputAttributes: { placeholder: 'http://127.0.0.1:36677/upload' }
         },
         group: 'image',
       }
@@ -53,18 +53,43 @@ export default {
 
         logger.debug('upload', url, file)
 
+        // remote mode, use multipart/form-data to upload
+        if (url.includes('key=')) {
+          const formData = new FormData()
+          formData.append('file', file)
+
+          try {
+            const { result } = await ctx.api.proxyFetch(
+              url,
+              { method: 'post', body: formData, },
+            ).then(r => r.json())
+
+            ctx.ui.useToast().hide()
+
+            if (result.length > 0) {
+              return result[0]
+            }
+          } catch (error) {
+            const msg = ctx.i18n.t('picgo.upload-failed')
+            ctx.ui.useToast().show('warning', msg)
+            throw new Error(msg)
+          }
+
+          return
+        }
+
         const tmpFileName = 'picgo-' + file.name
 
         try {
           const { data: { path } } = await ctx.api.writeTmpFile(tmpFileName, await ctx.utils.fileToBase64URL(file), true)
           logger.debug('tmp file', path)
 
-          const { result } = await ctx.api.proxyRequest(
+          const { result } = await ctx.api.proxyFetch(
             url,
             {
               method: 'post',
-              body: JSON.stringify({ list: [path] }),
-              headers: { 'Content-Type': 'application/json' }
+              body: { list: [path] },
+              jsonBody: true,
             },
           ).then(r => r.json())
 
@@ -113,7 +138,69 @@ export default {
       input.click()
     }
 
+    async function uploadLocalImage (srcAttr: string, originSrc: string) {
+      if (srcAttr && originSrc) {
+        const res: Response = await ctx.api.fetchHttp(srcAttr)
+        const fileName = ctx.utils.path.basename(ctx.utils.removeQuery(originSrc))
+        const file = new File(
+          [await res.blob()],
+          fileName,
+          { type: ctx.lib.mime.getType(fileName) || undefined }
+        )
+
+        try {
+          return await ctx.action.getActionHandler('plugin.image-hosting-picgo.upload')(file)
+        } catch (error) {
+          return null
+        }
+      }
+    }
+
+    async function uploadAllImage () {
+      const tokens = ctx.view.getRenderEnv()?.tokens
+      if (!tokens) {
+        return
+      }
+
+      const currentDocChecker = ctx.doc.createCurrentDocChecker()
+
+      const processImg = async (tokens: Token[]) => {
+        for (const token of tokens) {
+          currentDocChecker.throwErrorIfChanged()
+
+          if (token.children) {
+            await processImg(token.children)
+          }
+
+          if (token.tag === 'img' && token.attrGet(ctx.args.DOM_ATTR_NAME.LOCAL_IMAGE)) {
+            const srcAttr = token.attrGet('src')
+            const originSrc = token.attrGet(ctx.args.DOM_ATTR_NAME.ORIGIN_SRC)
+            const url = await uploadLocalImage(srcAttr!, originSrc!)
+
+            currentDocChecker.throwErrorIfChanged()
+
+            if (url) {
+              ctx.editor.replaceValue(
+                ctx.utils.encodeMarkdownLink(originSrc!),
+                ctx.utils.encodeMarkdownLink(url)
+              )
+            }
+          }
+        }
+      }
+
+      await processImg(tokens)
+    }
+
+    function when () {
+      const currentFile = ctx.store.state.currentFile
+      const previewFile = ctx.view.getRenderEnv()?.file
+
+      return !!(currentFile && ctx.editor.isDefault() && ctx.doc.isSameFile(currentFile, previewFile))
+    }
+
     const addImageActionId = 'plugin.image-hosting-picgo.add-image'
+    const uploadAllImageActionId = 'plugin.image-hosting-picgo.upload-all-image'
 
     ctx.editor.whenEditorReady().then(({ editor }) => {
       editor.addAction({
@@ -125,25 +212,44 @@ export default {
     })
 
     ctx.statusBar.tapMenus(menus => {
+      if (!when()) return
+
       menus['status-bar-insert']?.list?.unshift({
         id: addImageActionId,
         type: 'normal',
         title: ctx.i18n.t('add-image'),
+        ellipsis: true,
         subTitle: 'PicGo',
         onClick: addImage
+      })
+
+      menus['status-bar-tool']?.list?.push({
+        id: uploadAllImageActionId,
+        type: 'normal',
+        title: ctx.i18n.t('picgo.upload-all-images'),
+        subTitle: 'PicGo',
+        onClick: uploadAllImage
       })
     })
 
     ctx.view.tapContextMenus((items, e) => {
+      if (!when()) return
+
       const el = e.target as HTMLElement
 
       if (
         el.tagName === 'IMG' &&
         el.getAttribute(DOM_ATTR_NAME.LOCAL_IMAGE)
       ) {
+        const repo = el.getAttribute(DOM_ATTR_NAME.TARGET_REPO)
+        if (repo === ctx.args.HELP_REPO_NAME) {
+          return
+        }
+
         items.push({
           id: 'plugin.image-hosting-picgo.upload-single-image',
           type: 'normal',
+          ellipsis: false,
           label: ctx.i18n.t('upload-image') + ' (PicGo)',
           onClick: async () => {
             try {
@@ -151,12 +257,16 @@ export default {
                 throw new Error('No file opened.')
               }
 
+              const srcAttr = el.getAttribute('src')
               const originSrc = el.getAttribute(DOM_ATTR_NAME.ORIGIN_SRC)!
-              const fileName = ctx.utils.path.basename(ctx.utils.removeQuery(originSrc))
-              const res: Response = await ctx.api.fetchHttp(el.getAttribute('src')!)
-              const file = new File([await res.blob()], fileName)
-              const url = await ctx.action.getActionHandler(uploadActionName)(file)
-              ctx.editor.replaceValue(ctx.utils.encodeMarkdownLink(originSrc), `${url}`)
+
+              const url = await uploadLocalImage(srcAttr!, originSrc)
+              if (url) {
+                ctx.editor.replaceValue(
+                  ctx.utils.encodeMarkdownLink(originSrc),
+                  ctx.utils.encodeMarkdownLink(url)
+                )
+              }
             } catch (error: any) {
               ctx.ui.useToast().show('warning', error.message)
             }

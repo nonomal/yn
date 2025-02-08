@@ -4,27 +4,10 @@ import { $args } from '@fe/support/args'
 import { basename } from '@fe/utils/path'
 import { switchDoc } from '@fe/services/document'
 import { whenEditorReady } from '@fe/services/editor'
-import type { Repo } from '@fe/types'
 
 export default {
   name: 'status-bar-repository-switch',
   register: ctx => {
-    function choose (repo: Repo) {
-      const { currentRepo } = store.state
-      if (repo.name !== currentRepo?.name) {
-        store.commit('setCurrentRepo', repo)
-      }
-    }
-
-    function chooseRepoByName (name?: string) {
-      if (name) {
-        const repo = ctx.base.getRepo(name)
-        if (repo) {
-          choose(repo)
-        }
-      }
-    }
-
     function initRepo () {
       const { currentRepo } = store.state
 
@@ -32,7 +15,11 @@ export default {
       const initFilePath = $args().get('init-file')
 
       if (initRepoName) {
-        chooseRepoByName(initRepoName)
+        try {
+          ctx.repo.setCurrentRepo(initRepoName)
+        } catch (error) {
+          console.error(error)
+        }
       }
 
       if (initFilePath) {
@@ -49,19 +36,20 @@ export default {
         title: currentRepo
           ? ctx.i18n.t('status-bar.repo.repo', currentRepo.name.substring(0, 10))
           : ctx.i18n.t('status-bar.repo.no-data'),
-        list: ctx.setting.getSetting('repos', []).map(({ name, path }, i, arr) => {
+        list: ctx.repo.getAllRepos().map((repo, i, arr) => {
+          const { name, path } = repo
           return {
             id: name,
             type: 'normal',
             title: name,
             tips: path,
             checked: currentRepo && currentRepo.name === name && currentRepo.path === path,
-            onClick: () => choose({ name, path }),
+            onClick: () => ctx.repo.setCurrentRepo(name),
             subTitle: i === arr.length - 1
-              ? ctx.command.getKeysLabel([ctx.command.Alt, '0'])
+              ? ctx.keybinding.getKeysLabel('base.switch-repository-0')
               : (
                   i < 9
-                    ? ctx.command.getKeysLabel([ctx.command.Alt, (i + 1).toString()])
+                    ? ctx.keybinding.getKeysLabel(`base.switch-repository-${i + 1}`)
                     : undefined
                 ),
           }
@@ -71,36 +59,35 @@ export default {
 
     whenEditorReady().then(initRepo)
 
-    store.watch(() => store.state.currentRepo, ctx.statusBar.refreshMenu)
+    ctx.lib.vue.watch(() => store.state.currentRepo, ctx.statusBar.refreshMenu)
 
     ctx.registerHook('SETTING_FETCHED', ({ settings }) => {
       const { currentRepo } = store.state
       const { repos } = settings
 
+      // If the current repo is not in the list, switch to the first one
       if (!currentRepo || !repos.some(x => x.name === currentRepo.name && x.path === currentRepo.path)) {
-        if (repos.length > 0) {
-          store.commit('setCurrentRepo', { ...repos[0] })
-        } else {
-          store.commit('setCurrentRepo', undefined)
-        }
+        ctx.repo.setCurrentRepo(repos?.[0]?.name)
       } else {
         ctx.statusBar.refreshMenu()
       }
     })
 
-    window.addEventListener('keydown', e => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.code.startsWith('Digit')) {
-        const repoIndex = Number(e.code.substring(5)) - 1
-        const repos = ctx.setting.getSetting('repos', [])
-
-        const repo = repos[repoIndex === -1 ? repos.length - 1 : repoIndex]
-        if (repo) {
-          choose({ name: repo.name, path: repo.path })
-        }
-
-        e.preventDefault()
-        e.stopPropagation()
-      }
-    }, true)
+    for (let i = 0; i <= 9; i++) {
+      ctx.action.registerAction({
+        name: `base.switch-repository-${i}`,
+        description: i === 0 ? ctx.i18n.t('switch-the-last-repo') : ctx.i18n.t('switch-repo-n', String(i)),
+        forUser: true,
+        keys: [ctx.keybinding.Alt, String(i)],
+        handler: () => {
+          const repos = ctx.repo.getAllRepos()
+          const idx = i === 0 ? repos.length - 1 : i - 1
+          const repo = repos[idx]
+          if (repo) {
+            ctx.repo.setCurrentRepo(repo.name)
+          }
+        },
+      })
+    }
   }
 } as Plugin

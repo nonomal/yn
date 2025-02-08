@@ -8,9 +8,8 @@
 </template>
 
 <script lang="ts">
-import io from 'socket.io-client'
+import io, { Socket } from 'socket.io-client'
 import { defineComponent, nextTick, onBeforeMount, onBeforeUnmount, ref } from 'vue'
-import { useStore } from 'vuex'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import { OneHalfLight, OneHalfDark } from 'xterm-theme'
@@ -23,7 +22,7 @@ import { getColorScheme } from '@fe/services/theme'
 import { t } from '@fe/services/i18n'
 import { isWindows } from '@fe/support/env'
 import type { BuildInActions } from '@fe/types'
-import type { AppState } from '@fe/support/store'
+import store from '@fe/support/store'
 import SvgIcon from './SvgIcon.vue'
 
 import 'xterm/css/xterm.css'
@@ -34,13 +33,11 @@ export default defineComponent({
   name: 'xterm',
   components: { SvgIcon },
   setup () {
-    const store = useStore<AppState>()
-
     const refXterm = ref<HTMLElement | null>(null)
 
     let xterm: Terminal | null = null
     // eslint-disable-next-line no-undef
-    let socket: SocketIOClient.Socket | null = null
+    let socket: Socket | null = null
 
     const fitAddon = new FitAddon()
 
@@ -97,6 +94,10 @@ export default defineComponent({
         }
       }
 
+      if (FLAG_DEMO) {
+        return
+      }
+
       const query = {
         cwd: opts?.cwd || store.state.currentRepo?.path || ''
       }
@@ -116,6 +117,9 @@ export default defineComponent({
           toggleXterm(false)
         })
       }
+
+      // force trigger resize event
+      xterm.resize(xterm.cols, xterm.cols)
 
       if (!socket.connected) {
         socket.io.opts.query = query
@@ -151,7 +155,7 @@ export default defineComponent({
       }
 
       cmd.code.split('\n').forEach(x => {
-        input(x.trim())
+        input(x)
         input(eol)
       })
 

@@ -30,22 +30,21 @@
 
 <script lang="ts">
 import { computed, defineComponent, onBeforeUnmount, onMounted, ref, toRefs, watch } from 'vue'
-import { useStore } from 'vuex'
+import { HELP_REPO_NAME } from '@fe/support/args'
 import { getElectronRemote, isElectron, isMacOS, nodeRequire } from '@fe/support/env'
-import { isEncrypted } from '@fe/services/document'
+import { isEncrypted, isOutOfRepo } from '@fe/services/document'
 import { useI18n } from '@fe/services/i18n'
+import store from '@fe/support/store'
 import SvgIcon from './SvgIcon.vue'
-import type { Doc } from '@fe/types'
 
 export default defineComponent({
   name: 'title-bar',
   components: { SvgIcon },
   setup () {
-    const store = useStore()
     const { t } = useI18n()
 
     const { currentFile } = toRefs(store.state)
-    const isSaved = computed(() => store.getters.isSaved)
+    const isSaved = store.getters.isSaved
 
     let win: any = null
 
@@ -55,11 +54,11 @@ export default defineComponent({
     const isFocused = ref(false)
 
     function handleFullscreenEnter () {
-      store.commit('setIsFullscreen', true)
+      store.state.isFullscreen = true
     }
 
     function handleFullscreenLeave () {
-      store.commit('setIsFullscreen', false)
+      store.state.isFullscreen = false
     }
 
     function updateWindowStatus () {
@@ -106,31 +105,7 @@ export default defineComponent({
       win && win.close()
     }
 
-    onMounted(() => {
-      if (!isElectron) {
-        window.onbeforeunload = () => {
-          return !isSaved.value || null
-        }
-      }
-
-      if (isElectron && nodeRequire) {
-        win = getElectronRemote().getCurrentWindow()
-        hasWin.value = true
-        updateWindowStatus()
-        win.on('maximize', updateWindowStatus)
-        win.on('restore', updateWindowStatus)
-        win.on('unmaximize', updateWindowStatus)
-        win.on('always-on-top-changed', updateWindowStatus)
-        win.on('focus', updateWindowStatus)
-        win.on('blur', updateWindowStatus)
-
-        // win.isFullScreen() not work
-        win.on('enter-full-screen', handleFullscreenEnter)
-        win.on('leave-full-screen', handleFullscreenLeave)
-      }
-    })
-
-    onBeforeUnmount(() => {
+    function clean () {
       if (!isElectron) {
         window.onbeforeunload = null
       }
@@ -149,15 +124,47 @@ export default defineComponent({
 
       win = null
       hasWin.value = false
+    }
+
+    onMounted(() => {
+      if (!isElectron) {
+        window.onbeforeunload = () => {
+          return !isSaved.value || null
+        }
+      }
+
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore
+      if (isElectron && nodeRequire) {
+        win = getElectronRemote().getCurrentWindow()
+        hasWin.value = true
+        updateWindowStatus()
+        win.on('maximize', updateWindowStatus)
+        win.on('restore', updateWindowStatus)
+        win.on('unmaximize', updateWindowStatus)
+        win.on('always-on-top-changed', updateWindowStatus)
+        win.on('focus', updateWindowStatus)
+        win.on('blur', updateWindowStatus)
+
+        // win.isFullScreen() not work
+        win.on('enter-full-screen', handleFullscreenEnter)
+        win.on('leave-full-screen', handleFullscreenLeave)
+
+        window.addEventListener('beforeunload', clean)
+      }
+    })
+
+    onBeforeUnmount(() => {
+      clean()
     })
 
     const statusText = computed(() => {
       let status = ''
 
-      const file: Doc = currentFile.value
+      const file = currentFile.value
 
       if (file) {
-        if (file.repo === '__help__') {
+        if (file.repo === HELP_REPO_NAME) {
           return file.title
         }
 
@@ -173,8 +180,12 @@ export default defineComponent({
           status = t('file-status.loading')
         }
 
+        const repoStr = isOutOfRepo(file)
+          ? ''
+          : `[${file.repo}]`
+
         if (file.path && file.repo) {
-          return `[${file.repo}] ${isSaved.value ? '' : '*'}${file.path}-${status}`
+          return `${repoStr} ${isSaved.value ? '' : '*'}${file.path}-${status}`
         } else {
           return file.name
         }
@@ -205,6 +216,9 @@ export default defineComponent({
     watch(isSaved, (val: boolean) => {
       // expose save state for electron usage.
       window.documentSaved = val
+      if (win && isMacOS) {
+        win.setDocumentEdited(!val)
+      }
     }, { immediate: true })
 
     return {
@@ -238,7 +252,7 @@ export default defineComponent({
   -webkit-user-select: none;
   -webkit-app-region: drag;
   position: relative;
-  z-index: 199999;
+  z-index: 8000000;
 }
 
 .resizer {
